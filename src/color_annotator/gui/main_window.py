@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem, QPushButton, QHeaderView, QLineEdit, QMessageBox
 )
 from PyQt5.QtCore import Qt
-from gui.image_viewer import ImageViewer
+from .image_viewer import ImageViewer
 
 class MainWindow(QMainWindow):
     def __init__(self):

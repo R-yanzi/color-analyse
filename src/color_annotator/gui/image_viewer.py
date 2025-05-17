@@ -7,8 +7,8 @@ import cv2
 from PyQt5.QtWidgets import QLabel, QApplication, QTableWidgetItem
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QCursor, QColor
 from PyQt5.QtCore import Qt, QPoint, QSize, pyqtSignal, QRect
-from sam_interface.sam_segmentor import SAMSegmentor
-from utils.sam_thread import SAMWorker  # 异步推理线程
+from src.color_annotator.sam_interface.sam_segmentor import SAMSegmentor
+from src.color_annotator.utils.sam_thread import SAMWorker  # 异步推理线程
 from PyQt5.QtWidgets import QMessageBox
 from PyQt5.QtWidgets import QProgressDialog
 from PyQt5.QtCore import pyqtSignal
