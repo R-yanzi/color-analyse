@@ -386,8 +386,17 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "保存失败", f"发生错误：{str(e)}")
 
     def open_image(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择图片", "", "Images (*.png *.jpg *.bmp)")
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择图片", "", "Images (*.png *.jpg *.bmp *.tif *.tiff)")
         if file_path:
+            ext = os.path.splitext(file_path)[-1].lower()
+            if ext in ['.tif', '.tiff']:
+                from PIL import Image
+                img_pil = Image.open(file_path).convert("RGB")  # 转换为 RGB 三通道
+                img = np.array(img_pil)
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # 保持与原有代码一致的 BGR 格式
+            else:
+                img = cv2.imread(file_path)
+
             img = cv2.imread(file_path)
             self.viewer.set_image(img)
 
