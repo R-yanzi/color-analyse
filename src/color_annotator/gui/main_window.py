@@ -6,7 +6,7 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QMainWindow, QPushButton, QFileDialog, QVBoxLayout,
     QWidget, QHBoxLayout, QSlider, QLabel, QTableWidget, QAbstractItemView,
-    QTableWidgetItem, QPushButton, QHeaderView, QLineEdit, QMessageBox
+    QTableWidgetItem, QPushButton, QHeaderView, QLineEdit, QMessageBox, QCheckBox
 )
 from PyQt5.QtCore import Qt
 from .image_viewer import ImageViewer
@@ -80,6 +80,10 @@ class MainWindow(QMainWindow):
         control_widget = QWidget()
         control_widget.setLayout(control_bar)
 
+        eraser_shape_box = QCheckBox("使用圆形橡皮擦")
+        eraser_shape_box.stateChanged.connect(self.toggle_eraser_shape)
+        control_bar.addWidget(eraser_shape_box)
+
         # === 右侧标注表格 ===
         self.annotation_table = QTableWidget()
         self.annotation_table.setColumnCount(7)
@@ -152,10 +156,10 @@ class MainWindow(QMainWindow):
 
     def run_segmentation(self):
         # 清除旧的 pending 掩码状态
-        self.pending_annotation = None
-        self.pending_mask_id = None
-        self.viewer.pending_mask_id = None
-        self.viewer.mask = None  # 防止继续合并老掩码
+        # self.pending_annotation = None
+        # self.pending_mask_id = None
+        # self.viewer.pending_mask_id = None
+        # self.viewer.mask = None  # 防止继续合并老掩码
 
         self.viewer.run_sam_with_points()
 
@@ -502,3 +506,8 @@ class MainWindow(QMainWindow):
         self.scale_slider.setValue(slider_val)
         self.scale_slider.blockSignals(False)
         self.scale_label.setText(f"{slider_val}%")
+
+    def toggle_eraser_shape(self, state):
+        self.viewer.eraser_shape_circle = (state == Qt.Checked)
+        self.viewer.update()
+

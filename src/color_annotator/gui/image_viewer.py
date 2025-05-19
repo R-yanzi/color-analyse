@@ -33,6 +33,9 @@ class ImageViewer(QLabel):
         self.undo_stack = []
         self.redo_stack = []
         self.masks = {}  # { mask_id: {'mask': numpy.ndarray, 'visible': bool} }
+        self.point_undo_stack = []  # 💡 添加：前景/背景点操作的撤销栈
+        self.point_redo_stack = []
+        self.eraser_shape_circle = False  # 默认使用方形橡皮擦
 
         self.scale_factor = None
         self.resized_image = None
@@ -60,7 +63,7 @@ class ImageViewer(QLabel):
         self.erase_rect = None  # 用于存储擦除框的区域
         self.setFocusPolicy(Qt.StrongFocus)  # 💡 允许接受键盘焦点
 
-    def set_image(self, image: np.ndarray, max_size=1024):
+    def set_image(self, image: np.ndarray, max_size=512):
         self.cancel_segmentation()  # 如果有正在运行的分割线程，终止
         self.clear_annotations()  # 清除未保存的标定
         self.masks.clear()
@@ -75,22 +78,17 @@ class ImageViewer(QLabel):
         self.original_shape = image.shape[:2]  # 原始大小 (h, w)
         h, w = self.original_shape
 
-        # 如果不需要 resize
-        if max(h, w) <= max_size:
-            self.resized_image = image
-            self.scale_factor = 1.0
-        else:
+        if max(h, w) > max_size:
             scale = max_size / max(h, w)
-            new_w = int(w * scale)
-            new_h = int(h * scale)
-            self.resized_image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-            self.scale_factor = 1.0 / scale  # resize 后未来用于放大回来
+            image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+            print(f"[自动缩放] 原图尺寸 {w}x{h} 已缩小为 {image.shape[1]}x{image.shape[0]}")
 
-        self.cv_img = image
+        self.cv_img = image  # 👈 直接将缩小图赋值为主图
         self.mask = None
+        self.erase_size = int(min(image.shape[:2]) / 40)  # 动态调整橡皮擦大小（例如 25px）
         self.compute_initial_scale()
         self.reset_view()
-        self.sam.set_image(image)  # 会自动 resize 并设置
+        self.sam.set_image(image)  # SAM 使用缩小图
 
     def compute_initial_scale(self):
         if self.cv_img is None:
@@ -141,7 +139,11 @@ class ImageViewer(QLabel):
 
             mask_bool = mask.astype(np.bool_)
             overlay = rgb_img.copy()
-            overlay[mask_bool] = (r, g, b)
+            # 如果当前是正在编辑的掩码，就使用高亮绿色显示
+            if entry.get("editable", False) and mask_id == self.pending_mask_id:
+                overlay[mask_bool] = (0, 255, 0)  # 高亮绿色
+            else:
+                overlay[mask_bool] = (r, g, b)
 
             # 半透明混合，仅对掩码区域有效
             alpha = 0.8
@@ -157,7 +159,8 @@ class ImageViewer(QLabel):
             else:
                 border_color = (200, 200, 200)  # 已保存标定使用白色边框，提升可见性
 
-            cv2.drawContours(rgb_img, contours, -1, border_color, thickness=2)
+            scale_thickness = max(1, int(1 / self.scale))  # 根据缩放动态调整线宽
+            cv2.drawContours(rgb_img, contours, -1, border_color, thickness=scale_thickness)
 
         # === 转换为 QPixmap 并绘制图像 ===
         qt_img = QImage(rgb_img.data, width, height, bytes_per_line, QImage.Format_RGB888).copy()
@@ -207,12 +210,15 @@ class ImageViewer(QLabel):
             pen.setColor(Qt.gray)  # 你可以改成 Qt.black 或 QColor(100, 100, 100)
             painter.setPen(pen)
             painter.setBrush(Qt.white)
-            painter.drawRect(
-                scaled_x - scaled_erase_size // 2,
-                scaled_y - scaled_erase_size // 2,
-                scaled_erase_size,
-                scaled_erase_size
-            )
+            if self.eraser_shape_circle:
+                painter.drawEllipse(QPoint(scaled_x, scaled_y), scaled_erase_size // 2, scaled_erase_size // 2)
+            else:
+                painter.drawRect(
+                    scaled_x - scaled_erase_size // 2,
+                    scaled_y - scaled_erase_size // 2,
+                    scaled_erase_size,
+                    scaled_erase_size
+                )
 
     def mousePressEvent(self, event):
         self.setFocus()  # 鼠标点击时抢焦点，确保能按快捷键
@@ -240,6 +246,8 @@ class ImageViewer(QLabel):
                     x, y = int(img_pos.x()), int(img_pos.y())
                     print(f"[点击] 添加背景点：({x}, {y})")
                     self.bg_points.append((x, y))
+                    self.point_undo_stack.append(("bg", (x, y)))  # 💡 添加撤销记录
+                    self.point_redo_stack.clear()
                     self.repaint()
                 else:
                     # 左键拖动
@@ -253,15 +261,19 @@ class ImageViewer(QLabel):
                 x, y = int(img_pos.x()), int(img_pos.y())
                 print(f"[点击] 添加前景点：({x}, {y})")
                 self.fg_points.append((x, y))
+                self.point_undo_stack.append(("fg", (x, y)))  # 💡 添加撤销记录
+                self.point_redo_stack.clear()
                 self.repaint()
 
     def keyPressEvent(self, event):
         if event.modifiers() & Qt.ControlModifier:
             if event.key() == Qt.Key_Z:
-                self.undo()
+                if not self.undo():  # 掩码无法撤销
+                    self.undo_point()  # 尝试撤销前景点/背景点
                 return
             elif event.key() == Qt.Key_Y:
-                self.redo()
+                if not self.redo():
+                    self.redo_point()
                 return
         super().keyPressEvent(event)
 
@@ -294,6 +306,38 @@ class ImageViewer(QLabel):
             print("[重做] 恢复到撤销前的掩码状态")
         else:
             print("[重做] 无可恢复内容")
+
+    def undo_point(self):
+        if not self.point_undo_stack:
+            print("[点撤销] 无可撤销内容")
+            return False
+
+        point_type, coord = self.point_undo_stack.pop()
+        self.point_redo_stack.append((point_type, coord))
+        if point_type == "fg":
+            if coord in self.fg_points:
+                self.fg_points.remove(coord)
+        elif point_type == "bg":
+            if coord in self.bg_points:
+                self.bg_points.remove(coord)
+        self.repaint()
+        print(f"[点撤销] 撤销 {point_type} 点：{coord}")
+        return True
+
+    def redo_point(self):
+        if not self.point_redo_stack:
+            print("[点重做] 无可恢复内容")
+            return False
+
+        point_type, coord = self.point_redo_stack.pop()
+        self.point_undo_stack.append((point_type, coord))
+        if point_type == "fg":
+            self.fg_points.append(coord)
+        elif point_type == "bg":
+            self.bg_points.append(coord)
+        self.repaint()
+        print(f"[点重做] 恢复 {point_type} 点：{coord}")
+        return True
 
     def modify_mask(self, x, y, repaint=True, save_history=False):
         # 自动创建一个新的可编辑掩码（未经过分割）
@@ -333,6 +377,10 @@ class ImageViewer(QLabel):
         for i in range(max(0, y - half_size), min(h, y + half_size + 1)):
             for j in range(max(0, x - half_size), min(w, x + half_size + 1)):
                 if 0 <= j < w and 0 <= i < h:
+                    if self.eraser_shape_circle:
+                        # 计算到中心点的距离
+                        if (i - y) ** 2 + (j - x) ** 2 > half_size ** 2:
+                            continue
                     if self.mode == "erase":
                         self.mask[i, j] = False
                     elif self.mode == "add":
@@ -535,19 +583,19 @@ class ImageViewer(QLabel):
 
         if ctrl_pressed:
             # Ctrl 被按下
-            if self.mode == "erase":
-                # 调整橡皮擦大小
+            if self.mode in ("erase", "add"):
+                # ✅ Ctrl + 滚轮 + 编辑模式 → 调整橡皮大小
                 if event.angleDelta().y() > 0:
                     self.erase_size = min(self.erase_size + 2, 200)
                 else:
                     self.erase_size = max(self.erase_size - 2, 5)
                 print(f"[擦除大小调整] 当前橡皮擦大小: {self.erase_size}px")
-                self.update()  # 刷新白块
+                self.update()  # 刷新
             else:
-                # 非擦除模式下 Ctrl+滚轮仍然可以缩放
+                # Ctrl + 滚轮 + 非编辑模式 → 缩放
                 self.zoom_image(event)
         else:
-            # Ctrl 没按下时，统一滚轮缩放图片
+            # ✅ 普通滚轮：不论是否处于掩码模式，都可以缩放
             self.zoom_image(event)
 
     def set_scale(self, value):
