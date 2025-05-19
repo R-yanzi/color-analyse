@@ -61,6 +61,16 @@ class ImageViewer(QLabel):
         self.setFocusPolicy(Qt.StrongFocus)  # 💡 允许接受键盘焦点
 
     def set_image(self, image: np.ndarray, max_size=1024):
+        self.cancel_segmentation()  # 如果有正在运行的分割线程，终止
+        self.clear_annotations()  # 清除未保存的标定
+        self.masks.clear()
+        self.mask = None
+        self.pending_mask_id = None
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self.fg_points.clear()
+        self.bg_points.clear()
+
         """设置图像供 SAM 使用，并自动 resize 控制大小"""
         self.original_shape = image.shape[:2]  # 原始大小 (h, w)
         h, w = self.original_shape
@@ -152,8 +162,8 @@ class ImageViewer(QLabel):
         # === 转换为 QPixmap 并绘制图像 ===
         qt_img = QImage(rgb_img.data, width, height, bytes_per_line, QImage.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(qt_img).scaled(
-            self.cv_img.shape[1] * self.scale,
-            self.cv_img.shape[0] * self.scale,
+            int(self.cv_img.shape[1] * self.scale),
+            int(self.cv_img.shape[0] * self.scale),
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation
         )
@@ -577,8 +587,9 @@ class ImageViewer(QLabel):
             print("[用户操作] 取消分割")
             self.sam_thread.terminate()
             self.sam_thread.wait()
-        self.progress_dialog.close()
-        self.progress_dialog = None
+        if self.progress_dialog:  # ✅ 加入空值判断
+            self.progress_dialog.close()
+            self.progress_dialog = None
 
     # 清空标定
     def clear_annotations(self):
