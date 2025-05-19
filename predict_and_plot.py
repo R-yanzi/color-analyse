@@ -130,7 +130,7 @@ if __name__ == "__main__":
         exit(1)
 
     test_images = [f for f in os.listdir(TEST_IMAGE_DIR)
-                   if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+                   if f.lower().endswith((".jpg", ".jpeg", ".png", ".tif", ".tiff"))]
 
     if not test_images:
         print("[提示] 测试目录中没有图片")
