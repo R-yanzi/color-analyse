@@ -680,6 +680,16 @@ class ImageViewer(QLabel):
             size = tuple(ann["size"])
             rle = ann["rle"]
             mask_array = self.decode_rle(rle, size)
+
+            # ✅ 修复：若掩码尺寸与当前图像不一致，进行 resize（使用最近邻）
+            if self.cv_img is not None and mask_array.shape != self.cv_img.shape[:2]:
+                print(f"[修复] 掩码尺寸 {mask_array.shape} 与图像尺寸 {self.cv_img.shape[:2]} 不一致，自动缩放")
+                mask_array = cv2.resize(
+                    mask_array.astype(np.uint8),
+                    (self.cv_img.shape[1], self.cv_img.shape[0]),
+                    interpolation=cv2.INTER_NEAREST
+                ).astype(bool)
+
             color = tuple(ann.get("main_color", [0, 255, 0]))
 
             mask_id = f"mask_{idx}"
