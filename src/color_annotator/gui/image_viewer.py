@@ -170,7 +170,7 @@ class ImageViewer(QLabel):
 
         draw_x = int((self.width() - pixmap.width()) / 2 + self.offset.x())
         draw_y = int((self.height() - pixmap.height()) / 2 + self.offset.y())
-        painter.drawPixmap(draw_x, draw_y, pixmap)
+        painter.drawPixmap(int(draw_x), int(draw_y), pixmap)
 
         # === 点绘制：前景绿色、背景红色 ===
         scaled_w = int(self.cv_img.shape[1] * self.scale)
