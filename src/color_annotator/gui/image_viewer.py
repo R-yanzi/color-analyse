@@ -17,6 +17,7 @@ from PyQt5.QtCore import pyqtSignal
 class ImageViewer(QLabel):
     scaleChanged = pyqtSignal(float)
     annotationAdded = pyqtSignal(tuple)  # 💡 新增发主色信号，(R, G, B)
+    segmentationOverlayReady = pyqtSignal(QPixmap)  # 💡 发射 overlay 图
 
     def __init__(self):
         super().__init__()
@@ -435,6 +436,21 @@ class ImageViewer(QLabel):
         color = self.extract_main_color()
         if color:
             self.annotationAdded.emit((color, mask_id))
+
+        # 💡 生成分割可视化图像
+        self.generate_segmentation_overlay(mask)
+
+    def generate_segmentation_overlay(self, mask):
+        img = self.cv_img.copy()
+        mask_uint8 = mask.astype(np.uint8) * 255
+        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(img, contours, -1, (0, 255, 0), thickness=2)
+
+        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_img.shape
+        qimg = QImage(rgb_img.data, w, h, ch * w, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg)
+        self.segmentationOverlayReady.emit(pixmap)
 
     def extract_main_color(self):
         """从当前掩码提取主色（简单取平均颜色）"""

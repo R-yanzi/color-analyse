@@ -2,49 +2,33 @@ import os
 import cv2
 import numpy as np
 import json
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QMainWindow, QPushButton, QFileDialog, QVBoxLayout,
     QWidget, QHBoxLayout, QSlider, QLabel, QTableWidget, QAbstractItemView,
-    QTableWidgetItem, QPushButton, QHeaderView, QLineEdit, QMessageBox, QCheckBox
+    QTableWidgetItem, QPushButton, QHeaderView, QLineEdit, QMessageBox, QCheckBox, QGridLayout
 )
 from PyQt5.QtCore import Qt
 from .image_viewer import ImageViewer
+import matplotlib.pyplot as plt
+from io import BytesIO
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("畲族服饰图像标定工具")
-        self.setGeometry(100, 100, 1500, 800)
+        self.setGeometry(100, 100, 1700, 1000)
 
         self.viewer = ImageViewer()
-        self.pending_annotation = None  # 分割后待保存的主色
-        self.pending_mask_id = None     # 分割后掩码的 ID
+        self.viewer.setFixedSize(1024, 660)
 
-        # === 操作栏按钮 ===
+        # 控制栏
         open_btn = QPushButton("打开图片")
         open_btn.clicked.connect(self.open_image)
-
         reset_btn = QPushButton("重置视图")
         reset_btn.clicked.connect(self.viewer.reset_view)
-
-        run_btn = QPushButton("执行分割")
-        run_btn.clicked.connect(self.run_segmentation)
-
-        save_btn = QPushButton("保存标定")
-        save_btn.clicked.connect(self.save_annotation)
-
-        clear_btn = QPushButton("清除标注")
-        clear_btn.clicked.connect(self.viewer.clear_annotations)
-
-        add_btn = QPushButton("增加掩码")
-        add_btn.clicked.connect(self.viewer.set_add_mode)
-
-        erase_btn = QPushButton("擦除掩码")
-        erase_btn.clicked.connect(self.viewer.set_erase_mode)
-
-        self.viewer.set_erase_button(erase_btn)
-        self.viewer.set_add_button(add_btn)
+        save_btn = QPushButton("保存数据")
+        save_btn.clicked.connect(self.save_annotations_to_json)
 
         zoom_label = QLabel("缩放：")
         self.scale_slider = QSlider(Qt.Horizontal)
@@ -53,38 +37,58 @@ class MainWindow(QMainWindow):
         self.scale_slider.setFixedWidth(200)
         self.scale_slider.setSingleStep(5)
         self.scale_slider.valueChanged.connect(self.slider_zoom)
-
         self.scale_label = QLabel("100%")
         self.scale_label.setFixedWidth(60)
 
         control_bar = QHBoxLayout()
-
-        save_file_btn = QPushButton("保存数据")
-        save_file_btn.clicked.connect(self.save_annotations_to_json)
-        control_bar.addWidget(save_file_btn)
-
-        control_bar.setContentsMargins(10, 10, 10, 0)
-        control_bar.setSpacing(15)
+        control_bar.addWidget(save_btn)
         control_bar.addWidget(open_btn)
         control_bar.addWidget(reset_btn)
         control_bar.addWidget(zoom_label)
         control_bar.addWidget(self.scale_slider)
         control_bar.addWidget(self.scale_label)
         control_bar.addStretch()
-        control_bar.addWidget(run_btn)
-        control_bar.addWidget(save_btn)
-        control_bar.addWidget(clear_btn)
-        control_bar.addWidget(add_btn)
-        control_bar.addWidget(erase_btn)
-
         control_widget = QWidget()
         control_widget.setLayout(control_bar)
 
-        eraser_shape_box = QCheckBox("使用圆形橡皮擦")
-        eraser_shape_box.stateChanged.connect(self.toggle_eraser_shape)
-        control_bar.addWidget(eraser_shape_box)
+        # 左侧导航栏
+        left_nav_layout = QVBoxLayout()
+        nav_title = QLabel("导航栏")
+        nav_title.setAlignment(Qt.AlignCenter)
+        nav_title.setStyleSheet("font-weight: bold;")
+        left_nav_layout.addWidget(nav_title)
+        left_nav_layout.addSpacing(10)
 
-        # === 右侧标注表格 ===
+        btn_run = QPushButton("执行分割")
+        btn_save = QPushButton("保存标定")
+        btn_clear = QPushButton("清除标注")
+        btn_add = QPushButton("增加掩码")
+        btn_erase = QPushButton("擦除掩码")
+        eraser_box = QCheckBox("圆形橡皮擦")
+
+        for btn in [btn_run, btn_save, btn_clear, btn_add, btn_erase]:
+            btn.setFixedSize(160, 40)
+            btn.setStyleSheet("font-size: 14px;")
+            row = QHBoxLayout()
+            row.addStretch()
+            row.addWidget(btn)
+            row.addStretch()
+            left_nav_layout.addLayout(row)
+
+        box_row = QHBoxLayout()
+        box_row.addStretch()
+        box_row.addWidget(eraser_box)
+        box_row.addStretch()
+        left_nav_layout.addLayout(box_row)
+
+        left_nav_layout.addStretch()
+
+        left_nav_widget = QWidget()
+        left_nav_widget.setLayout(left_nav_layout)
+        left_nav_widget.setFixedWidth(220)
+        left_nav_widget.setStyleSheet("border-right: 1px solid gray;")
+
+        # 表格区域
         self.annotation_table = QTableWidget()
         self.annotation_table.setColumnCount(7)
         self.annotation_table.setHorizontalHeaderLabels(["编号", "主色", "R", "G", "B", "显示", "操作"])
@@ -92,67 +96,98 @@ class MainWindow(QMainWindow):
         self.annotation_table.setEditTriggers(QAbstractItemView.DoubleClicked)
         self.annotation_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.annotation_table.setSelectionMode(QAbstractItemView.SingleSelection)
-
-        # 设定每列固定宽度（单位：像素）
-        self.annotation_table.setColumnWidth(0, 50)  # 编号
-        self.annotation_table.setColumnWidth(1, 60)  # 主色
-        self.annotation_table.setColumnWidth(2, 50)  # R
-        self.annotation_table.setColumnWidth(3, 50)  # G
-        self.annotation_table.setColumnWidth(4, 50)  # B
-        self.annotation_table.setColumnWidth(5, 80)  # 显示
-        self.annotation_table.setColumnWidth(6, 120)  # 操作
-
-        # 总宽度 = 所有列宽 + 预留间距，防止横向滚动条出现
-        total_width = 50 + 60 + 50 + 50 + 50 + 80 + 120 + 20
-        self.annotation_table.setMinimumWidth(total_width)
-        self.annotation_table.setMaximumWidth(total_width)
-
-        # 设置样式：禁用选中变色/点击变透明
+        for i, w in zip(range(7), [50, 50, 50, 50, 50, 80, 110]):
+            self.annotation_table.setColumnWidth(i, w)
+        self.annotation_table.setFixedWidth(350)
+        self.annotation_table.setFixedHeight(660)
         self.annotation_table.setStyleSheet("""
-        QTableWidget::item:selected {
-            background-color: transparent;
-            color: black;
-        }
-        QTableWidget::item:focus {
-            background-color: transparent;
-            color: black;
-        }
-        QTableWidget::item:hover {
-            background-color: transparent;
-        }
+            QTableWidget::item:selected {
+                background-color: transparent;
+                color: black;
+            }
         """)
-
-        # 禁止自动拉伸防止破坏布局
         self.annotation_table.horizontalHeader().setSectionResizeMode(QHeaderView.Fixed)
-
-        # 单元格点击事件绑定（如显示切换）
         self.annotation_table.cellClicked.connect(self.toggle_mask_visibility)
         self.annotation_table.itemChanged.connect(self.handle_color_change)
 
-        # === 左侧主布局 ===
-        left_layout = QVBoxLayout()
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(10)
-        left_layout.addWidget(control_widget)
-        left_layout.addWidget(self.viewer)
-        left_layout.setStretch(0, 0)
-        left_layout.setStretch(1, 1)
+        # 三图 QLabel
+        self.annotation_preview_label = QLabel("标定区域合成预览")
+        self.segmentation_preview_label = QLabel("分割结果可视化预览")
+        self.color_pie_chart_label = QLabel("主色比例图")
 
-        # === 整体布局 ===
-        main_layout = QHBoxLayout()
-        main_layout.setContentsMargins(10, 10, 10, 10)
+        for label in [
+            self.annotation_preview_label,
+            self.segmentation_preview_label,
+            self.color_pie_chart_label
+        ]:
+            label.setFixedSize(320, 320)
+            label.setAlignment(Qt.AlignCenter)
+            label.setStyleSheet("border: 1px solid gray;")
+            label.setScaledContents(False)
+
+        bottom_layout = QHBoxLayout()
+        bottom_layout.setSpacing(60)
+        bottom_layout.setContentsMargins(40, 10, 40, 10)
+        bottom_layout.addStretch()
+        bottom_layout.addWidget(self.annotation_preview_label)
+        bottom_layout.addWidget(self.segmentation_preview_label)
+        bottom_layout.addWidget(self.color_pie_chart_label)
+        bottom_layout.addStretch()
+
+        bottom_widget = QWidget()
+        bottom_widget.setLayout(bottom_layout)
+
+        # viewer 区域
+        self.viewer.set_add_button(btn_add)
+        self.viewer.set_erase_button(btn_erase)
+        self.viewer.segmentationOverlayReady.connect(self.show_segmentation_preview)
+
+        center_layout = QVBoxLayout()
+        center_layout.addWidget(control_widget)
+        center_layout.addWidget(self.viewer)
+        center_widget = QWidget()
+        center_widget.setLayout(center_layout)
+
+        # 顶部三列（左导航、中主图，右表格）
+        top_layout = QHBoxLayout()
+        top_layout.setContentsMargins(10, 10, 10, 0)
+        top_layout.setSpacing(10)
+        top_layout.addWidget(left_nav_widget)
+        top_layout.addWidget(center_widget)
+        top_layout.addWidget(self.annotation_table)
+
+        # 最终组合（顶部 + 底部）
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(10)
-        main_layout.addLayout(left_layout)
-        main_layout.addWidget(self.annotation_table)
-        main_layout.setStretch(0, 3)
-        main_layout.setStretch(1, 1)
+        main_layout.addLayout(top_layout)
+        main_layout.addWidget(bottom_widget)
 
         container = QWidget()
         container.setLayout(main_layout)
         self.setCentralWidget(container)
 
+        # 信号绑定
         self.viewer.scaleChanged.connect(self.update_scale_ui)
         self.viewer.annotationAdded.connect(self.cache_annotation)
+        btn_run.clicked.connect(self.run_segmentation)
+        btn_save.clicked.connect(self.save_annotation)
+        btn_clear.clicked.connect(self.viewer.clear_annotations)
+        btn_add.clicked.connect(self.viewer.set_add_mode)
+        btn_erase.clicked.connect(self.viewer.set_erase_mode)
+        eraser_box.stateChanged.connect(self.toggle_eraser_shape)
+
+    def show_segmentation_preview(self, pixmap):
+        w, h = pixmap.width(), pixmap.height()
+        target_size = self.segmentation_preview_label.size()
+        max_w, max_h = target_size.width(), target_size.height()
+
+        if w / h > max_w / max_h:
+            scaled = pixmap.scaledToWidth(max_w, Qt.SmoothTransformation)
+        else:
+            scaled = pixmap.scaledToHeight(max_h, Qt.SmoothTransformation)
+
+        self.segmentation_preview_label.setPixmap(scaled)
 
     def run_segmentation(self):
         # 清除旧的 pending 掩码状态
@@ -209,6 +244,8 @@ class MainWindow(QMainWindow):
         self.viewer.mask = None
         self.viewer.pending_mask_id = None
         print("[完成] 当前标定保存成功")
+        self.update_annotation_preview()
+        self.update_color_pie_chart()
 
     def add_annotation_to_table(self, color, mask_id):
         row = self.annotation_table.rowCount()
@@ -296,6 +333,9 @@ class MainWindow(QMainWindow):
         else:
             print("[取消] 删除操作已取消")
 
+        self.update_annotation_preview()
+        self.update_color_pie_chart()
+
     @staticmethod
     def encode_rle(mask: np.ndarray):
         flat = mask.flatten()
@@ -313,6 +353,101 @@ class MainWindow(QMainWindow):
             else:
                 i += 1
         return rle
+
+    def update_annotation_preview(self):
+        if self.viewer.cv_img is None:
+            return
+
+        img = self.viewer.cv_img.copy()
+        overlay = np.zeros_like(img, dtype=np.uint8)
+
+        for entry in self.viewer.masks.values():
+            if not entry.get("visible", True):
+                continue
+            mask = entry.get("mask")
+            if mask is None or mask.shape != overlay.shape[:2]:
+                continue
+            color = entry.get("color", (0, 255, 0))
+            r, g, b = color
+            overlay[mask] = (b, g, r)
+
+        # 叠加时只让掩码部分半透明，其余部分完全显示原图
+        alpha = 0.9
+        mask_area = (overlay > 0).any(axis=2)
+        preview = img.copy()
+        preview[mask_area] = cv2.addWeighted(img[mask_area], 1 - alpha, overlay[mask_area], alpha, 0)
+
+        preview_rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+        h, w, _ = preview_rgb.shape
+        qimg = QImage(preview_rgb.data, w, h, w * 3, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg)
+
+        self.annotation_preview_label.setPixmap(
+            pixmap.scaled(self.annotation_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+
+    def update_color_pie_chart(self):
+        if self.viewer.cv_img is None:
+            return
+
+        mask_stats = []
+        for entry in self.viewer.masks.values():
+            if not entry.get("visible", True):
+                continue
+            mask = entry.get("mask")
+            color = entry.get("color")
+            if mask is None or color is None:
+                continue
+            area = np.sum(mask)
+            if area == 0:
+                continue
+            mask_stats.append({
+                "color": color,
+                "area": area
+            })
+
+        if not mask_stats:
+            self.segmentation_preview_label.setText("无可视掩码，无法生成比例图")
+            return
+
+        labels = []
+        sizes = []
+        colors = []
+
+        for idx, entry in enumerate(mask_stats):
+            r, g, b = entry["color"]
+            labels.append(str(idx + 1))
+            sizes.append(entry["area"])
+            colors.append(f"#{r:02x}{g:02x}{b:02x}")
+
+        fig, ax = plt.subplots(figsize=(4, 4))
+
+        wedges, texts, autotexts = ax.pie(
+            sizes,
+            labels=None,  # 不再显示 labels
+            colors=colors,
+            autopct='%1.1f%%',
+            startangle=90,
+            pctdistance=1.2  # 控制比例文字向外偏移
+        )
+
+        # 统一文字样式（颜色+字体）
+        for autotext in autotexts:
+            autotext.set_color('black')
+            autotext.set_fontsize(12)
+
+        ax.axis('equal')
+
+        buf = BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight')
+        buf.seek(0)
+        plt.close(fig)
+
+        img = QImage.fromData(buf.read())
+        pixmap = QPixmap.fromImage(img)
+        self.color_pie_chart_label.setPixmap(
+            pixmap.scaled(self.color_pie_chart_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
 
     def toggle_mask_visibility(self, row, column):
         if column == 5:
@@ -433,6 +568,8 @@ class MainWindow(QMainWindow):
             self.scale_slider.blockSignals(True)
             self.scale_slider.setValue(slider_val)
             self.scale_slider.blockSignals(False)
+        self.update_annotation_preview()
+        self.update_color_pie_chart()
 
     def handle_color_change(self, item):
         row = item.row()
