@@ -568,8 +568,21 @@ class MainWindow(QMainWindow):
             self.scale_slider.blockSignals(True)
             self.scale_slider.setValue(slider_val)
             self.scale_slider.blockSignals(False)
-        self.update_annotation_preview()
-        self.update_color_pie_chart()
+
+        self.update_scale_ui()
+        slider_val = int(self.viewer.scale / self.viewer.base_scale * 100)
+        self.scale_slider.blockSignals(True)
+        self.scale_slider.setValue(slider_val)
+        self.scale_slider.blockSignals(False)
+
+        # 加保护：避免空数据时闪退
+        if self.viewer.masks:
+            self.update_annotation_preview()
+            self.update_color_pie_chart()
+        else:
+            self.annotation_preview_label.clear()
+            self.segmentation_preview_label.clear()
+            self.color_pie_chart_label.clear()
 
     def handle_color_change(self, item):
         row = item.row()
