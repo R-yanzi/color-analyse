@@ -98,7 +98,7 @@ class MainWindow(QMainWindow):
         self.annotation_table.setSelectionMode(QAbstractItemView.SingleSelection)
         for i, w in zip(range(7), [50, 50, 50, 50, 50, 80, 110]):
             self.annotation_table.setColumnWidth(i, w)
-        self.annotation_table.setFixedWidth(350)
+        self.annotation_table.setFixedWidth(455)
         self.annotation_table.setFixedHeight(660)
         self.annotation_table.setStyleSheet("""
             QTableWidget::item:selected {
@@ -525,7 +525,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "保存失败", f"发生错误：{str(e)}")
 
     def open_image(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择图片", "", "Images (*.png *.jpg *.bmp *.tif *.tiff)")
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择图片", "./images", "Images (*.png *.jpg *.bmp *.tif *.tiff)")
         if file_path:
             ext = os.path.splitext(file_path)[-1].lower()
             if ext in ['.tif', '.tiff']:
