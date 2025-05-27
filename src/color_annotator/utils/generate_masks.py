@@ -12,7 +12,7 @@ def decode_rle(rle, shape):
         flat[start:start + length] = 1
     return flat.reshape(shape)
 
-def generate_all_masks(anno_dir="annotations", image_dir="images", output_dir="dataset"):
+def generate_all_masks(anno_dir="annotations", image_dir="images", output_dir="datasets"):
     os.makedirs(f"{output_dir}/images", exist_ok=True)
     os.makedirs(f"{output_dir}/masks", exist_ok=True)
     os.makedirs(f"{output_dir}/masks_colored", exist_ok=True)
@@ -58,6 +58,6 @@ if __name__ == "__main__":
 
     anno_dir = os.path.join(project_root, "src", "color_annotator", "annotations")
     image_dir = os.path.join(project_root, "src", "color_annotator", "images")
-    output_dir = os.path.join(project_root, "src", "dataset")
+    output_dir = os.path.join(project_root, "src", "datasets")
 
     generate_all_masks(anno_dir, image_dir, output_dir)
