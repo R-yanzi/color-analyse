@@ -23,11 +23,13 @@ class SegmentationDatasetBuilder:
         # 创建必要的目录
         self.train_img_dir = self.output_dir / "train" / "read_images"
         self.train_mask_dir = self.output_dir / "train" / "masks"
+        self.train_anno_dir = self.output_dir / "train" / "annotations"
         self.val_img_dir = self.output_dir / "val" / "read_images"
         self.val_mask_dir = self.output_dir / "val" / "masks"
+        self.val_anno_dir = self.output_dir / "val" / "annotations"
         
-        for dir_path in [self.train_img_dir, self.train_mask_dir, 
-                        self.val_img_dir, self.val_mask_dir]:
+        for dir_path in [self.train_img_dir, self.train_mask_dir, self.train_anno_dir,
+                        self.val_img_dir, self.val_mask_dir, self.val_anno_dir]:
             dir_path.mkdir(parents=True, exist_ok=True)
 
     def decode_rle(self, rle, shape):
@@ -114,7 +116,7 @@ class SegmentationDatasetBuilder:
             
             return {
                 'image': image,
-                'mask': combined_mask,
+                'mask': combined_mask * 255,  # 将掩码转换为0-255范围
                 'filename': img_path.name
             }
             
@@ -169,30 +171,56 @@ class SegmentationDatasetBuilder:
         # 保存数据集
         print("\n=== 保存数据集 ===")
         print("保存训练集...")
-        self._save_dataset_split(train_data, self.train_img_dir, self.train_mask_dir)
+        self._save_dataset_split(train_data, self.train_img_dir, self.train_mask_dir, self.train_anno_dir)
         
         print("\n保存验证集...")
-        self._save_dataset_split(val_data, self.val_img_dir, self.val_mask_dir)
+        self._save_dataset_split(val_data, self.val_img_dir, self.val_mask_dir, self.val_anno_dir)
 
         print("\n=== 数据集构建完成 ===")
         print(f"训练集: {len(train_data)} 样本")
         print(f"验证集: {len(val_data)} 样本")
         print(f"\n数据集保存在: {self.output_dir}")
 
-    def _save_dataset_split(self, data_split, img_dir, mask_dir):
-        """保存数据集划分"""
-        for idx, item in enumerate(data_split):
-            # 保存图像
-            img_path = img_dir / item['filename']
-            cv2.imwrite(str(img_path), item['image'])
-            print(f"✓ 保存图像: {img_path.name}")
-            
-            # 保存掩码
-            mask_path = mask_dir / item['filename'].replace(
-                Path(item['filename']).suffix, '_mask.png'
-            )
-            cv2.imwrite(str(mask_path), item['mask'] * 255)
-            print(f"✓ 保存掩码: {mask_path.name}")
+    def _save_dataset_split(self, data_split, img_dir, mask_dir, anno_dir=None):
+        """保存数据集分割"""
+        # 确保目录存在
+        img_dir.mkdir(parents=True, exist_ok=True)
+        mask_dir.mkdir(parents=True, exist_ok=True)
+        if anno_dir:
+            anno_dir.mkdir(parents=True, exist_ok=True)
+        
+        for item in data_split:
+            try:
+                # 保存图像
+                img_path = img_dir / item['filename']
+                success = cv2.imwrite(str(img_path), item['image'])
+                if not success:
+                    print(f"错误: 无法保存图像: {img_path}")
+                    continue
+                print(f"✓ 保存图像: {item['filename']} -> {img_path}")
+                
+                # 保存掩码
+                mask_filename = Path(item['filename']).stem + '_mask.png'
+                mask_path = mask_dir / mask_filename
+                success = cv2.imwrite(str(mask_path), item['mask'])
+                if not success:
+                    print(f"错误: 无法保存掩码: {mask_path}")
+                    continue
+                print(f"✓ 保存掩码: {mask_filename} -> {mask_path}")
+                
+                # 复制原始JSON文件
+                if anno_dir:
+                    filename_stem = Path(item['filename']).stem
+                    json_source = self.annotations_dir / f"{filename_stem}.json"
+                    if json_source.exists():
+                        json_dest = anno_dir / f"{filename_stem}.json"
+                        shutil.copy(json_source, json_dest)
+                        print(f"✓ 复制标注: {json_source.name} -> {json_dest}")
+                
+            except Exception as e:
+                print(f"保存文件时出错: {item['filename']}")
+                print(f"错误: {str(e)}")
+                continue
 
 def main():
     """主函数"""

@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+# 添加项目根目录到路径
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent.parent))
+
 import json
 import os
 
@@ -6,7 +11,7 @@ import torch
 import cv2
 from PyQt5.QtWidgets import QLabel, QApplication, QTableWidgetItem
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QCursor, QColor
-from PyQt5.QtCore import Qt, QPoint, QSize, pyqtSignal, QRect
+from PyQt5.QtCore import Qt, QPoint, QSize, pyqtSignal, QRect, QTimer
 from src.color_annotator.sam_interface.sam_segmentor import SAMSegmentor
 from src.color_annotator.utils.sam_thread import SAMWorker  # 异步推理线程
 from src.color_annotator.utils.color_analyzer import ColorAnalyzer  # 新增：颜色分析器
@@ -18,56 +23,85 @@ from PyQt5.QtCore import pyqtSignal
 class ImageViewer(QLabel):
     scaleChanged = pyqtSignal(float)
     annotationAdded = pyqtSignal(tuple)  # 💡 新增发主色信号，(R, G, B)
-    segmentationOverlayReady = pyqtSignal(QPixmap)  # 💡 发射 overlay 图
+    magnifierUpdated = pyqtSignal(QPixmap)  # 新增放大镜信号
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # 初始化SAM分割器
+        try:
+            self.sam = SAMSegmentor()
+            print("[Viewer] SAM分割器初始化成功")
+        except Exception as e:
+            print(f"[Viewer] SAM分割器初始化失败: {str(e)}")
+            self.sam = None
+        
+        # 基本属性
+        self.cv_img = None
+        self.pixmap = None
+        self.scale = 1.0
+        self.base_scale = 1.0
+        self.offset = QPoint(0, 0)
+        self.last_pos = None
+        
+        # 绘制相关
+        self.drawing = False
+        self.erasing = False
+        self.mask = None
+        self.masks = {}
         self.pending_mask_id = None
+        self.eraser_size = 20
+        self.eraser_shape_circle = True
+        
+        # 点击和标注
+        self.click_points = []
+        self.click_labels = []
+        self.fg_points = []
+        self.bg_points = []
+        
+        # 按钮和模式
         self.add_button = None
         self.erase_button = None
         self.last_erase_pos = None
-        self.setMouseTracking(True)
-        self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("border: 1px solid gray")
-        self.mode = "normal"  # 默认为增加模式（可以修改为 'erase'）
-        self.fg_points = []  # 前景点
-        self.bg_points = []  # 背景点
+        self.mode = "normal"
+        
+        # 撤销/重做
         self.undo_stack = []
         self.redo_stack = []
-        self.masks = {}  # { mask_id: {'mask': numpy.ndarray, 'visible': bool} }
-        self.point_undo_stack = []  # 💡 添加：前景/背景点操作的撤销栈
+        self.point_undo_stack = []
         self.point_redo_stack = []
-        self.eraser_shape_circle = False  # 默认使用方形橡皮擦
-
+        
+        # 缩放和变换
         self.scale_factor = None
         self.resized_image = None
         self.original_shape = None
-
-        self.is_editing = False  # 当前是否正在一次连续编辑
-        self.cv_img = None
-        self.scale = 1.0
-        self.offset = QPoint(0, 0)
         self.dragging = False
         self.last_mouse_pos = QPoint(0, 0)
-        self.base_scale = 1.0
+        
+        # 编辑状态
+        self.is_editing = False
+        self.erase_rect = None
+        
+        # 线程和进度
+        self.sam_thread = None
+        self.progress_dialog = None
+        
+        # 颜色分析器
+        self.color_analyzer = ColorAnalyzer()
+        
+        # 放大镜相关
+        self.magnifier_active = False
+        self.magnifier_zoom = 3.0  # 放大倍数
+        self.magnifier_size = 150  # 放大镜尺寸
+        self.current_magnifier_pixmap = None  # 存储当前放大镜内容
+        
+        # 界面设置
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("border: 1px solid gray")
 
-        self.mask = None
-        self.sam = SAMSegmentor(
-            model_type="vit_b",  # 使用轻量模型
-            checkpoint_path="checkpoints/sam_vit_b.pth",
-            device="cuda" if torch.cuda.is_available() else "cpu"
-        )
-        self.sam_thread = None  # 异步线程对象
-        self.progress_dialog = None  # 加载中弹窗
-
-        self.erase_size = 30  # 擦除区域的大小（正方形）
-
-        self.erase_rect = None  # 用于存储擦除框的区域
-        self.setFocusPolicy(Qt.StrongFocus)  # 💡 允许接受键盘焦点
-
-        self.color_analyzer = ColorAnalyzer()  # 新增：颜色分析器实例
-
-    def set_image(self, image: np.ndarray, max_size=512):
+    def set_image(self, image: np.ndarray, max_size=1024):
         self.cancel_segmentation()  # 如果有正在运行的分割线程，终止
         self.clear_annotations()  # 清除未保存的标定
         self.masks.clear()
@@ -82,17 +116,20 @@ class ImageViewer(QLabel):
         self.original_shape = image.shape[:2]  # 原始大小 (h, w)
         h, w = self.original_shape
 
+        # 只有在图像特别大时才进行缩放
         if max(h, w) > max_size:
             scale = max_size / max(h, w)
-            image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+            # 使用更好的插值方法
+            image = cv2.resize(image, (int(w * scale), int(h * scale)), 
+                             interpolation=cv2.INTER_LANCZOS4)
             print(f"[自动缩放] 原图尺寸 {w}x{h} 已缩小为 {image.shape[1]}x{image.shape[0]}")
 
-        self.cv_img = image  # 👈 直接将缩小图赋值为主图
+        self.cv_img = image
         self.mask = None
-        self.erase_size = int(min(image.shape[:2]) / 40)  # 动态调整橡皮擦大小（例如 25px）
+        self.eraser_size = int(min(image.shape[:2]) / 40)  # 动态调整橡皮擦大小
         self.compute_initial_scale()
         self.reset_view()
-        self.sam.set_image(image)  # SAM 使用缩小图
+        self.sam.set_image(image)  # SAM 使用处理后的图像
 
     def compute_initial_scale(self):
         if self.cv_img is None:
@@ -112,6 +149,12 @@ class ImageViewer(QLabel):
             self.setCursor(Qt.ArrowCursor)
             if self.add_button:
                 self.add_button.setStyleSheet("")
+            # 只设置状态，不发送信号
+            self.magnifier_active = False
+            try:
+                self.magnifierUpdated.emit(QPixmap())
+            except Exception as e:
+                print(f"[警告] 发送放大镜信号时出错: {e}")
         else:
             # 当前不是增加模式，点击进入增加模式
             self.mode = "add"
@@ -121,6 +164,7 @@ class ImageViewer(QLabel):
                 self.add_button.setStyleSheet("background-color: lightgreen;")
             if self.erase_button:
                 self.erase_button.setStyleSheet("")  # 取消擦除按钮高亮
+            self.magnifier_active = True
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -202,11 +246,11 @@ class ImageViewer(QLabel):
             cursor_pos = self.mapFromGlobal(QCursor.pos())
             img_pos = self.map_to_image(cursor_pos)
             x, y = int(img_pos.x()), int(img_pos.y())
-            half_size = self.erase_size // 2
+            half_size = self.eraser_size // 2
 
             scaled_x = int(x * self.scale + draw_x)
             scaled_y = int(y * self.scale + draw_y)
-            scaled_erase_size = int(self.erase_size * self.scale)
+            scaled_erase_size = int(self.eraser_size * self.scale)
 
             # 画橡皮边框（灰色描边 + 白色填充）
             pen = painter.pen()
@@ -231,6 +275,7 @@ class ImageViewer(QLabel):
             if event.button() == Qt.LeftButton:
                 # 开始新的编辑动作
                 self.is_editing = True
+                self.magnifier_active = True  # 激活放大镜
 
                 # 只在首次点击时记录 undo（若当前掩码是可编辑）
                 if self.mask is not None and self.masks.get(self.pending_mask_id, {}).get("editable", False):
@@ -240,7 +285,10 @@ class ImageViewer(QLabel):
                 img_pos = self.map_to_image(event.pos())
                 x, y = int(img_pos.x()), int(img_pos.y())
                 print(f"[修改掩码] 当前模式: {self.mode}，位置: ({x}, {y})")
-                self.modify_mask(x, y, save_history=True)  # 注意这里 save_history=False
+                self.modify_mask(x, y, save_history=True)
+                
+                # 更新放大镜
+                self.update_magnifier(event.pos())
         else:
             # 正常模式下添加前景点/背景点/拖动
             if event.button() == Qt.LeftButton:
@@ -344,116 +392,160 @@ class ImageViewer(QLabel):
         return True
 
     def modify_mask(self, x, y, repaint=True, save_history=False):
-        # 自动创建一个新的可编辑掩码（未经过分割）
-        if self.mode == "add" and self.pending_mask_id is None:
-            h, w = self.cv_img.shape[:2]
-            mask = np.zeros((h, w), dtype=bool)
-            mask_id = f"mask_{len(self.masks)}"
+        try:
+            # 自动创建一个新的可编辑掩码（未经过分割）
+            if self.mode == "add" and self.pending_mask_id is None:
+                h, w = self.cv_img.shape[:2]
+                mask = np.zeros((h, w), dtype=bool)
+                mask_id = f"mask_{len(self.masks)}"
 
+                self.masks[mask_id] = {
+                    'mask': mask,
+                    'visible': True,
+                    'color': (0, 255, 0),
+                    'editable': True
+                }
+                self.mask = mask
+                self.pending_mask_id = mask_id
+
+                color = self.extract_main_color()
+                if color:
+                    self.annotationAdded.emit((color, mask_id))
+
+            """根据当前模式，擦除或增加掩码"""
+            if self.mask is None:
+                h, w = self.cv_img.shape[:2]
+                self.mask = np.zeros((h, w), dtype=bool)
+
+            # 只处理 editable=True 的当前掩码（如果当前掩码不在 masks 中则默认允许）
+            for mask_id, entry in self.masks.items():
+                if entry.get("editable", False):
+                    break
+            else:
+                # 没有可编辑掩码，说明是只读状态，不进行修改
+                return
+
+            h, w = self.cv_img.shape[:2]
+            half_size = self.eraser_size // 2
+            
+            # 创建一个临时掩码，用于圆形橡皮擦
+            if self.eraser_shape_circle:
+                try:
+                    # 创建一个与图像大小相同的零矩阵
+                    temp_mask = np.zeros((h, w), dtype=np.uint8)
+                    
+                    # 在临时掩码上绘制圆形
+                    cv2.circle(
+                        temp_mask, 
+                        (x, y), 
+                        half_size, 
+                        1, 
+                        -1  # 填充圆
+                    )
+                    
+                    # 根据模式应用临时掩码
+                    temp_mask_bool = temp_mask.astype(bool)
+                    if self.mode == "erase":
+                        # 擦除模式：将圆形区域内的像素设为False
+                        self.mask[temp_mask_bool] = False
+                    elif self.mode == "add":
+                        # 增加模式：将圆形区域内的像素设为True
+                        self.mask[temp_mask_bool] = True
+                except Exception as e:
+                    print(f"[错误] 圆形橡皮擦失败: {e}")
+                    # 出错时回退到方形橡皮擦
+                    self.eraser_shape_circle = False
+            
+            # 方形橡皮擦或圆形失败时的备选方案
+            if not self.eraser_shape_circle:
+                # 方形橡皮擦：遍历矩形区域内的每个像素
+                for i in range(max(0, y - half_size), min(h, y + half_size + 1)):
+                    for j in range(max(0, x - half_size), min(w, x + half_size + 1)):
+                        if 0 <= j < w and 0 <= i < h:
+                            if self.mode == "erase":
+                                self.mask[i, j] = False
+                            elif self.mode == "add":
+                                self.mask[i, j] = True
+
+            # 更新当前掩码
+            if self.pending_mask_id in self.masks:
+                self.masks[self.pending_mask_id]['mask'] = self.mask
+
+            if repaint:
+                self.repaint()
+        except Exception as e:
+            print(f"[错误] 修改掩码时出错: {e}")
+            import traceback
+            print(traceback.format_exc())
+
+    def on_mask_ready(self, mask):
+        """处理分割完成的回调"""
+        try:
+            print("[分割] 收到分割结果")
+            
+            if self.progress_dialog:
+                self.progress_dialog.close()
+                self.progress_dialog = None
+
+            if mask is None:
+                print("[错误] 掩码生成失败")
+                return
+
+            if not isinstance(mask, np.ndarray):
+                print(f"[错误] 掩码类型不正确: {type(mask)}")
+                return
+
+            print(f"[分割] 掩码尺寸: {mask.shape}, 类型: {mask.dtype}")
+            print(f"[分割] 掩码统计: 最小值={mask.min()}, 最大值={mask.max()}, 平均值={mask.mean():.4f}")
+            print(f"[分割] 掩码中前景像素数: {np.sum(mask)}")
+
+            if mask.shape[:2] != self.cv_img.shape[:2]:
+                print(f"[错误] 掩码尺寸不合法：{mask.shape} vs 图像：{self.cv_img.shape}")
+                return
+
+            # 如果已有未保存的掩码，则合并
+            if self.pending_mask_id and self.pending_mask_id in self.masks:
+                print(f"[分割合并] 合并掩码到 {self.pending_mask_id}")
+                self.masks[self.pending_mask_id]['mask'] |= mask
+                self.mask = self.masks[self.pending_mask_id]['mask']
+                # 清除标注点
+                self.fg_points.clear()
+                self.bg_points.clear()
+                self.repaint()
+                return
+
+            # 否则新建一个掩码记录
+            mask_id = f"mask_{len(self.masks)}"
+            print(f"[分割] 创建新掩码: {mask_id}")
             self.masks[mask_id] = {
                 'mask': mask,
                 'visible': True,
-                'color': (0, 255, 0),
-                'editable': True
+                'editable': True,
+                'color': (0, 255, 0)  # 默认颜色，保存时会更新
             }
             self.mask = mask
             self.pending_mask_id = mask_id
 
-            color = self.extract_main_color()
-            if color:
-                self.annotationAdded.emit((color, mask_id))
-
-        """根据当前模式，擦除或增加掩码"""
-        if self.mask is None:
-            h, w = self.cv_img.shape[:2]
-            self.mask = np.zeros((h, w), dtype=bool)
-
-        # 只处理 editable=True 的当前掩码（如果当前掩码不在 masks 中则默认允许）
-        for mask_id, entry in self.masks.items():
-            if entry.get("editable", False):
-                break
-        else:
-            # 没有可编辑掩码，说明是只读状态，不进行修改
-            return
-
-        h, w = self.cv_img.shape[:2]
-        half_size = self.erase_size // 2
-        for i in range(max(0, y - half_size), min(h, y + half_size + 1)):
-            for j in range(max(0, x - half_size), min(w, x + half_size + 1)):
-                if 0 <= j < w and 0 <= i < h:
-                    if self.eraser_shape_circle:
-                        # 计算到中心点的距离
-                        if (i - y) ** 2 + (j - x) ** 2 > half_size ** 2:
-                            continue
-                    if self.mode == "erase":
-                        self.mask[i, j] = False
-                    elif self.mode == "add":
-                        self.mask[i, j] = True
-
-        if repaint:
-            self.repaint()
-
-    def on_mask_ready(self, mask):
-        if self.progress_dialog:
-            self.progress_dialog.close()
-            self.progress_dialog = None
-
-        if mask is None:
-            print("[错误] 掩码生成失败")
-            return
-
-        if mask.shape[:2] != self.cv_img.shape[:2]:
-            print(f"[错误] 掩码尺寸不合法：{mask.shape} vs 图像：{self.cv_img.shape}")
-            return
-
-        print(f"[完成] 掩码像素：{np.sum(mask)}")
-
-        # 如果已有未保存的掩码，则合并
-        if self.pending_mask_id and self.pending_mask_id in self.masks:
-            print(f"[分割合并] 合并掩码到 {self.pending_mask_id}")
-            self.masks[self.pending_mask_id]['mask'] |= mask
-            self.mask = self.masks[self.pending_mask_id]['mask']
             # 清除标注点
             self.fg_points.clear()
             self.bg_points.clear()
             self.repaint()
-            return
 
-        # 否则新建一个掩码记录
-        mask_id = f"mask_{len(self.masks)}"
-        self.masks[mask_id] = {
-            'mask': mask,
-            'visible': True,
-            'editable': True,
-            'color': (0, 255, 0)  # 默认颜色，保存时会更新
-        }
-        self.mask = mask
-        self.pending_mask_id = mask_id
+            # 提取颜色 & 发出 annotationAdded 信号
+            print("[分割] 提取主色...")
+            color_info = self.extract_main_color()
+            if color_info:
+                print(f"[分割] 主色: RGB={color_info.rgb}, 占比={color_info.percentage:.1%}")
+                self.annotationAdded.emit((color_info, mask_id))
+            else:
+                print("[警告] 无法提取主色")
 
-        # 清除标注点
-        self.fg_points.clear()
-        self.bg_points.clear()
-        self.repaint()
+            print("[分割] 处理完成")
 
-        # 提取颜色 & 发出 annotationAdded 信号
-        color_info = self.extract_main_color()
-        if color_info:
-            self.annotationAdded.emit((color_info, mask_id))
-
-        # 生成分割可视化图像
-        self.generate_segmentation_overlay(mask)
-
-    def generate_segmentation_overlay(self, mask):
-        img = self.cv_img.copy()
-        mask_uint8 = mask.astype(np.uint8) * 255
-        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(img, contours, -1, (0, 255, 0), thickness=2)
-
-        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb_img.shape
-        qimg = QImage(rgb_img.data, w, h, ch * w, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimg)
-        self.segmentationOverlayReady.emit(pixmap)
+        except Exception as e:
+            import traceback
+            print(f"[错误] 处理分割结果时出错: {str(e)}")
+            print(traceback.format_exc())
 
     def extract_main_color(self):
         """从当前掩码提取主色（使用新的颜色分析器）"""
@@ -466,10 +558,10 @@ class ImageViewer(QLabel):
             self.mask,
             k=5  # 提取5个主要颜色
         )
-        
+
         if not color_infos:
             return None
-            
+
         # 返回占比最大的颜色信息对象
         return color_infos[0]  # 返回ColorInfo对象
 
@@ -508,48 +600,87 @@ class ImageViewer(QLabel):
             self.modify_mask(x, y, repaint=False)
 
     def mouseMoveEvent(self, event):
-        left_pressed = QApplication.mouseButtons() & Qt.LeftButton
+        try:
+            left_pressed = QApplication.mouseButtons() & Qt.LeftButton
 
-        if self.mode in ("erase", "add"):
-            if left_pressed and self.is_editing:
-                img_pos = self.map_to_image(event.pos())
-                x, y = int(img_pos.x()), int(img_pos.y())
+            if self.mode in ("erase", "add"):
+                # 始终显示放大镜，即使没有按下鼠标
+                try:
+                    self.magnifier_active = True
+                    self.update_magnifier(event.pos())
+                except Exception as e:
+                    print(f"[警告] 更新放大镜时出错: {e}")
+                
+                if left_pressed and self.is_editing:
+                    img_pos = self.map_to_image(event.pos())
+                    x, y = int(img_pos.x()), int(img_pos.y())
 
-                if self.last_erase_pos is not None:
-                    last_x, last_y = self.last_erase_pos
-                    self.draw_line_between_points(last_x, last_y, x, y)
+                    if self.last_erase_pos is not None:
+                        last_x, last_y = self.last_erase_pos
+                        self.draw_line_between_points(last_x, last_y, x, y)
+                    else:
+                        self.modify_mask(x, y, save_history=False)
+
+                    self.last_erase_pos = (x, y)
                 else:
-                    self.modify_mask(x, y, save_history=True)  # 🚫
+                    self.last_erase_pos = None
 
-                self.last_erase_pos = (x, y)
+                self.update()
             else:
-                self.last_erase_pos = None
+                if self.dragging and left_pressed:
+                    delta = event.pos() - self.last_mouse_pos
+                    self.offset += delta
+                    self.last_mouse_pos = event.pos()
+                    self.repaint()
 
-            self.update()
-        else:
-            if self.dragging and left_pressed:
-                delta = event.pos() - self.last_mouse_pos
-                self.offset += delta
-                self.last_mouse_pos = event.pos()
-                self.repaint()
-
-        super().mouseMoveEvent(event)
+            super().mouseMoveEvent(event)
+        except Exception as e:
+            print(f"[错误] 鼠标移动事件处理出错: {e}")
+            import traceback
+            print(traceback.format_exc())
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.is_editing = False  # 结束编辑
-            if self.dragging:
-                self.dragging = False
-                self.setCursor(Qt.ArrowCursor)
+        try:
+            if event.button() == Qt.LeftButton:
+                self.is_editing = False  # 结束编辑
+                
+                # 只设置状态，不发送信号
+                if self.mode not in ("add", "erase"):
+                    self.magnifier_active = False
+                    try:
+                        self.magnifierUpdated.emit(QPixmap())
+                    except Exception as e:
+                        print(f"[警告] 发送放大镜信号时出错: {e}")
+                
+                self.last_erase_pos = None  # 重置擦除位置
+                
+                if self.dragging:
+                    self.dragging = False
+                    self.setCursor(Qt.ArrowCursor)
+                
+                # 强制重绘
+                self.update()
+        except Exception as e:
+            print(f"[错误] 鼠标释放事件处理出错: {e}")
+            import traceback
+            print(traceback.format_exc())
 
     def enterEvent(self, event):
         """鼠标进入控件"""
-        if self.mode == "erase":
+        if self.mode in ("add", "erase"):
             self.setCursor(Qt.BlankCursor)
+            self.magnifier_active = True
 
     def leaveEvent(self, event):
         """鼠标离开控件"""
         self.setCursor(Qt.ArrowCursor)  # 恢复正常箭头
+        if self.mode in ("add", "erase"):
+            # 只设置状态，不发送信号
+            self.magnifier_active = False
+            try:
+                self.magnifierUpdated.emit(QPixmap())
+            except Exception as e:
+                print(f"[警告] 发送放大镜信号时出错: {e}")
 
     def set_add_button(self, button):
         self.add_button = button
@@ -565,6 +696,12 @@ class ImageViewer(QLabel):
             self.setCursor(Qt.ArrowCursor)
             if self.erase_button:
                 self.erase_button.setStyleSheet("")
+            # 只设置状态，不发送信号
+            self.magnifier_active = False
+            try:
+                self.magnifierUpdated.emit(QPixmap())
+            except Exception as e:
+                print(f"[警告] 发送放大镜信号时出错: {e}")
         else:
             # 当前不是擦除模式，点击进入擦除模式
             self.mode = "erase"
@@ -574,6 +711,7 @@ class ImageViewer(QLabel):
                 self.erase_button.setStyleSheet("background-color: lightblue;")
             if self.add_button:
                 self.add_button.setStyleSheet("")  # 取消增加按钮高亮
+            self.magnifier_active = True
 
     def update_mask(self, x, y):
         """更新掩码"""
@@ -607,10 +745,10 @@ class ImageViewer(QLabel):
             if self.mode in ("erase", "add"):
                 # ✅ Ctrl + 滚轮 + 编辑模式 → 调整橡皮大小
                 if event.angleDelta().y() > 0:
-                    self.erase_size = min(self.erase_size + 2, 200)
+                    self.eraser_size = min(self.eraser_size + 2, 200)
                 else:
-                    self.erase_size = max(self.erase_size - 2, 5)
-                print(f"[擦除大小调整] 当前橡皮擦大小: {self.erase_size}px")
+                    self.eraser_size = max(self.eraser_size - 2, 5)
+                print(f"[擦除大小调整] 当前橡皮擦大小: {self.eraser_size}px")
                 self.update()  # 刷新
             else:
                 # Ctrl + 滚轮 + 非编辑模式 → 缩放
@@ -688,6 +826,7 @@ class ImageViewer(QLabel):
 
     # 执行分割
     def run_sam_with_points(self):
+        """执行基于前景点和背景点的SAM分割"""
         if not self.fg_points and not self.bg_points:
             print("[提示] 没有标注点")
             return
@@ -703,7 +842,7 @@ class ImageViewer(QLabel):
 
         input_points = np.array(all_fg + all_bg)
         input_labels = np.array([1] * len(all_fg) + [0] * len(all_bg))
-        print(f"[执行] SAM 分割，点数={len(input_points)}，labels={input_labels.tolist()}")
+        print(f"[执行] SAM 分割，前景点={len(all_fg)}，背景点={len(all_bg)}")
 
         # 显示进度条
         self.progress_dialog = QProgressDialog("正在分割图像...", "取消", 0, 0, self)
@@ -715,10 +854,12 @@ class ImageViewer(QLabel):
         self.progress_dialog.canceled.connect(self.cancel_segmentation)
         self.progress_dialog.show()
 
+        # 使用原始SAM进行分割
         self.sam_thread = SAMWorker(
             self.sam,
             points=input_points,
-            labels=input_labels
+            labels=input_labels,
+            multimask_output=False  # 只输出一个掩码
         )
         self.sam_thread.finished.connect(self.on_mask_ready)
         self.sam_thread.start()
@@ -773,3 +914,138 @@ class ImageViewer(QLabel):
         print(f"[加载] 成功载入 {len(self.masks)} 条掩码")
         self.repaint()
         return loaded_masks
+
+    def edit_annotation(self, mask_id):
+        """进入编辑模式"""
+        print(f"[编辑] 开始编辑掩码 {mask_id}")
+        if mask_id in self.masks:
+            # 保存当前颜色
+            current_color = self.masks[mask_id].get('color', (0, 255, 0))
+            
+            # 设置该掩码为可编辑状态
+            self.masks[mask_id]['editable'] = True
+            self.masks[mask_id]['visible'] = True
+            self.masks[mask_id]['color'] = current_color  # 确保保持原有颜色
+            
+            # 设置为当前活动掩码
+            self.pending_mask_id = mask_id
+            self.mask = self.masks[mask_id]['mask'].copy()  # 创建副本以防止直接修改
+            
+            # 清空撤销/重做栈
+            self.undo_stack.clear()
+            self.redo_stack.clear()
+            
+            print(f"[编辑] 掩码设置完成，颜色: {current_color}")
+            self.update()
+
+    def get_magnifier_pixmap(self):
+        """获取当前放大镜内容"""
+        return self.current_magnifier_pixmap
+
+    def update_magnifier(self, pos):
+        """更新放大镜预览"""
+        try:
+            if not self.magnifier_active or self.cv_img is None:
+                self.current_magnifier_pixmap = None
+                # 发送空的QPixmap而不是None
+                self.magnifierUpdated.emit(QPixmap())
+                return
+                
+            # 获取鼠标在图像中的位置
+            img_pos = self.map_to_image(pos)
+            x, y = int(img_pos.x()), int(img_pos.y())
+            
+            # 确保坐标在图像范围内
+            h, w = self.cv_img.shape[:2]
+            if not (0 <= x < w and 0 <= y < h):
+                self.current_magnifier_pixmap = None
+                # 发送空的QPixmap而不是None
+                self.magnifierUpdated.emit(QPixmap())
+                return
+                
+            # 计算放大区域的范围
+            half_size = int(self.magnifier_size / (2 * self.magnifier_zoom))
+            
+            # 确保不超出图像边界
+            x1 = max(0, x - half_size)
+            y1 = max(0, y - half_size)
+            x2 = min(w, x + half_size)
+            y2 = min(h, y + half_size)
+            
+            # 检查区域大小
+            if x2 <= x1 or y2 <= y1:
+                self.current_magnifier_pixmap = None
+                # 发送空的QPixmap而不是None
+                self.magnifierUpdated.emit(QPixmap())
+                return  # 区域无效
+                
+            # 提取原始图像区域
+            region = self.cv_img[y1:y2, x1:x2].copy()
+            
+            # 创建一个透明的覆盖层
+            overlay = region.copy()
+            
+            # 在覆盖层上绘制橡皮擦轮廓
+            center_x = x - x1
+            center_y = y - y1
+            eraser_radius = self.eraser_size // 2
+            
+            # 绘制橡皮擦轮廓（白色边框）
+            if self.eraser_shape_circle:
+                cv2.circle(overlay, (center_x, center_y), eraser_radius, (255, 255, 255), 2)
+            else:
+                # 绘制方形橡皮擦轮廓
+                top_left = (center_x - eraser_radius, center_y - eraser_radius)
+                bottom_right = (center_x + eraser_radius, center_y + eraser_radius)
+                cv2.rectangle(overlay, top_left, bottom_right, (255, 255, 255), 2)
+            
+            # 如果正在编辑现有掩码，显示原始掩码区域
+            if self.mask is not None and self.pending_mask_id is not None:
+                try:
+                    mask_region = self.mask[y1:y2, x1:x2].copy()
+                    
+                    # 根据当前模式确定颜色
+                    color = (0, 255, 0, 128) if self.mode == "add" else (255, 0, 0, 128)
+                    
+                    # 创建一个半透明的颜色层
+                    color_layer = np.zeros((y2-y1, x2-x1, 3), dtype=np.uint8)
+                    color_layer[mask_region] = color[:3]
+                    
+                    # 半透明混合
+                    alpha = 0.3
+                    overlay = cv2.addWeighted(overlay, 1.0, color_layer, alpha, 0)
+                except Exception as e:
+                    print(f"[警告] 显示掩码区域出错: {e}")
+            
+            # 绘制十字线指示当前位置
+            if 0 <= center_x < overlay.shape[1] and 0 <= center_y < overlay.shape[0]:
+                cv2.line(overlay, (center_x, 0), (center_x, overlay.shape[0]), (255, 255, 255), 1)
+                cv2.line(overlay, (0, center_y), (overlay.shape[1], center_y), (255, 255, 255), 1)
+            
+            # 放大图像
+            magnified = cv2.resize(overlay, None, fx=self.magnifier_zoom, fy=self.magnifier_zoom, 
+                                 interpolation=cv2.INTER_LINEAR)
+            
+            # 转换为 QPixmap
+            rgb_img = cv2.cvtColor(magnified, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb_img.shape
+            bytesPerLine = ch * w
+            qimg = QImage(rgb_img.data, w, h, bytesPerLine, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimg)
+            
+            # 存储当前放大镜内容
+            self.current_magnifier_pixmap = pixmap
+            
+            # 发送信号更新放大镜预览
+            self.magnifierUpdated.emit(pixmap)
+                
+        except Exception as e:
+            print(f"[错误] 更新放大镜时出错: {e}")
+            import traceback
+            print(traceback.format_exc())
+            self.current_magnifier_pixmap = None
+            try:
+                # 发送空的QPixmap而不是None
+                self.magnifierUpdated.emit(QPixmap())
+            except:
+                pass
