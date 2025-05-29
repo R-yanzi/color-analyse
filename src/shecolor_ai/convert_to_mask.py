@@ -10,7 +10,7 @@ from src.shecolor_ai.convert_rle_to_coco import rle_decode
 def convert_json_to_masks():
     root = os.path.abspath(os.path.join(__file__, "..", "..", ".."))
     ann_dir = os.path.join(root, "datasets", "shecolor", "annotations")
-    image_dir = os.path.join(root, "datasets", "shecolor", "images")
+    image_dir = os.path.join(root, "datasets", "shecolor", "read_images")
     mask_dir = os.path.join(root, "datasets", "shecolor", "masks")
     os.makedirs(mask_dir, exist_ok=True)
 

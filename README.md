@@ -88,21 +88,21 @@ project_root/
 ## 🧾 使用说明
 
 ### 界面
-![img.png](images/img.png)
+![img.png](read_images/img.png)
 支持手动拖拽、鼠标滚轮缩放图片
 
 ### 步骤
 #### ai 分割
 1、双击左键添加前景点；ctrl+单击左键添加背景点（前景点为绿色；背景点为红色）
-![img.png](images/img_6.png)
+![img.png](read_images/img_6.png)
 2、点击执行分割
-![img_1.png](images/img_1.png)
+![img_1.png](read_images/img_1.png)
 
 #### 人工微调修改
 **增加掩码**
-![img_2.png](images/img_2.png)
+![img_2.png](read_images/img_2.png)
 **擦除掩码**
-![img_3.png](images/img_3.png)
+![img_3.png](read_images/img_3.png)
 **支持撤销**
 
 ctrl+z撤销；ctrl+y撤销撤销
@@ -113,11 +113,11 @@ ctrl+z撤销；ctrl+y撤销撤销
 
 **保存标定**
 
-![img_4.png](images/img_4.png)
+![img_4.png](read_images/img_4.png)
 支持修改、删除、显示、调整RGB主色参数
 
 **修改**
-![img_5.png](images/img_5.png)
+![img_5.png](read_images/img_5.png)
 修改完成后点击保存标定保存修改
 
 **保存标定**

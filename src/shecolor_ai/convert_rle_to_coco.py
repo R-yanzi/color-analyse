@@ -15,12 +15,12 @@ def rle_decode(rle, size):
 def convert_rle_to_coco():
     PROJECT_ROOT = os.path.abspath(os.path.join(__file__, "..", "..", ".."))
     ANNOT_DIR = os.path.join(PROJECT_ROOT, "datasets", "shecolor", "annotations")
-    IMAGE_DIR = os.path.join(PROJECT_ROOT, "datasets", "shecolor", "images")
+    IMAGE_DIR = os.path.join(PROJECT_ROOT, "datasets", "shecolor", "read_images")
     COCO_OUTPUT = os.path.join(PROJECT_ROOT, "datasets", "shecolor", "coco")
     os.makedirs(COCO_OUTPUT, exist_ok=True)
 
     coco = {
-        "images": [],
+        "read_images": [],
         "annotations": [],
         "categories": [{"id": 1, "name": "main_color"}]
     }
@@ -45,7 +45,7 @@ def convert_rle_to_coco():
             continue
 
         height, width = data["annotations"][0]["size"]
-        coco["images"].append({
+        coco["read_images"].append({
             "id": image_id,
             "file_name": image_path,
             "width": width,

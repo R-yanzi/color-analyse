@@ -10,13 +10,13 @@ def convert():
     # ==== 目录配置 ====
     PROJECT_ROOT = os.path.abspath(os.path.join(__file__, "..", "..", ".."))
     ANNOT_DIR = os.path.join(PROJECT_ROOT, "datasets", "shecolor", "annotations")
-    IMAGE_DIR = os.path.join(PROJECT_ROOT, "datasets", "shecolor", "images")
+    IMAGE_DIR = os.path.join(PROJECT_ROOT, "datasets", "shecolor", "read_images")
     COCO_OUTPUT = os.path.join(PROJECT_ROOT, "datasets", "shecolor", "coco")
     os.makedirs(COCO_OUTPUT, exist_ok=True)
 
     # ==== COCO 初始化 ====
     coco = {
-        "images": [],
+        "read_images": [],
         "annotations": [],
         "categories": [{"id": 1, "name": "main_color"}]
     }
@@ -39,7 +39,7 @@ def convert():
         height = data.get("imageHeight", 512)
         width = data.get("imageWidth", 512)
 
-        coco["images"].append({
+        coco["read_images"].append({
             "id": image_id,
             "file_name": image_filename,
             "width": width,

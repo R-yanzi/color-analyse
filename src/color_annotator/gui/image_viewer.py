@@ -9,6 +9,7 @@ from PyQt5.QtGui import QPixmap, QImage, QPainter, QCursor, QColor
 from PyQt5.QtCore import Qt, QPoint, QSize, pyqtSignal, QRect
 from src.color_annotator.sam_interface.sam_segmentor import SAMSegmentor
 from src.color_annotator.utils.sam_thread import SAMWorker  # 异步推理线程
+from src.color_annotator.utils.color_analyzer import ColorAnalyzer  # 新增：颜色分析器
 from PyQt5.QtWidgets import QMessageBox
 from PyQt5.QtWidgets import QProgressDialog
 from PyQt5.QtCore import pyqtSignal
@@ -63,6 +64,8 @@ class ImageViewer(QLabel):
 
         self.erase_rect = None  # 用于存储擦除框的区域
         self.setFocusPolicy(Qt.StrongFocus)  # 💡 允许接受键盘焦点
+
+        self.color_analyzer = ColorAnalyzer()  # 新增：颜色分析器实例
 
     def set_image(self, image: np.ndarray, max_size=512):
         self.cancel_segmentation()  # 如果有正在运行的分割线程，终止
@@ -433,11 +436,11 @@ class ImageViewer(QLabel):
         self.repaint()
 
         # 提取颜色 & 发出 annotationAdded 信号
-        color = self.extract_main_color()
-        if color:
-            self.annotationAdded.emit((color, mask_id))
+        color_info = self.extract_main_color()
+        if color_info:
+            self.annotationAdded.emit((color_info, mask_id))
 
-        # 💡 生成分割可视化图像
+        # 生成分割可视化图像
         self.generate_segmentation_overlay(mask)
 
     def generate_segmentation_overlay(self, mask):
@@ -453,20 +456,22 @@ class ImageViewer(QLabel):
         self.segmentationOverlayReady.emit(pixmap)
 
     def extract_main_color(self):
-        """从当前掩码提取主色（简单取平均颜色）"""
+        """从当前掩码提取主色（使用新的颜色分析器）"""
         if self.cv_img is None or self.mask is None:
             return None
 
-        img_rgb = cv2.cvtColor(self.cv_img, cv2.COLOR_BGR2RGB)
-        mask = self.mask.astype(bool)
-
-        selected_pixels = img_rgb[mask]
-        if selected_pixels.size == 0:
+        # 使用颜色分析器提取主色
+        color_infos = self.color_analyzer.analyze_image_colors(
+            self.cv_img, 
+            self.mask,
+            k=5  # 提取5个主要颜色
+        )
+        
+        if not color_infos:
             return None
-
-        mean_color = selected_pixels.mean(axis=0)
-        mean_color = mean_color.astype(int)
-        return tuple(mean_color.tolist())  # 返回 (R, G, B)
+            
+        # 返回占比最大的颜色信息对象
+        return color_infos[0]  # 返回ColorInfo对象
 
     def set_mask_visibility(self, mask_id, visible, color=None):
         if mask_id in self.masks:
