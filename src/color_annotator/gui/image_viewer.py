@@ -5,6 +5,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent.parent))
 
 import json
 import os
+import time
 
 import numpy as np
 import torch
@@ -89,11 +90,18 @@ class ImageViewer(QLabel):
         # 颜色分析器
         self.color_analyzer = ColorAnalyzer()
         
-        # 放大镜相关
+        # 放大镜相关 - 调整参数
         self.magnifier_active = False
-        self.magnifier_zoom = 3.0  # 放大倍数
-        self.magnifier_size = 150  # 放大镜尺寸
+        self.magnifier_zoom = 2.5  # 减小放大倍数以容纳更大区域
+        self.magnifier_size = 180  # 增加放大镜尺寸
         self.current_magnifier_pixmap = None  # 存储当前放大镜内容
+        self.magnifier_update_delay = 20  # 降低放大镜更新延迟(ms)，提高响应
+        self.last_magnifier_update = time.time()
+        self.pending_update = False  # 是否有待处理的更新
+        
+        # 性能优化 - 添加绘制节流变量
+        self.last_paint_time = 0
+        self.paint_throttle_ms = 15  # 降低绘制间隔时间(毫秒)，确保更流畅的体验
         
         # 界面设置
         self.setMouseTracking(True)
@@ -149,12 +157,10 @@ class ImageViewer(QLabel):
             self.setCursor(Qt.ArrowCursor)
             if self.add_button:
                 self.add_button.setStyleSheet("")
-            # 只设置状态，不发送信号
-            self.magnifier_active = False
-            try:
+            # 只在放大镜处于活动状态时才关闭它
+            if self.magnifier_active:
+                # 触发信号通知主窗口隐藏放大镜
                 self.magnifierUpdated.emit(QPixmap())
-            except Exception as e:
-                print(f"[警告] 发送放大镜信号时出错: {e}")
         else:
             # 当前不是增加模式，点击进入增加模式
             self.mode = "add"
@@ -164,7 +170,11 @@ class ImageViewer(QLabel):
                 self.add_button.setStyleSheet("background-color: lightgreen;")
             if self.erase_button:
                 self.erase_button.setStyleSheet("")  # 取消擦除按钮高亮
-            self.magnifier_active = True
+            # 只在放大镜处于活动状态时才触发它
+            if self.magnifier_active:
+                # 不改变magnifier_active状态，只根据当前状态通知UI
+                # 在mouseMoveEvent中会更新放大镜内容
+                pass
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -417,6 +427,11 @@ class ImageViewer(QLabel):
                 h, w = self.cv_img.shape[:2]
                 self.mask = np.zeros((h, w), dtype=bool)
 
+            # 检查坐标是否在图像范围内
+            h, w = self.cv_img.shape[:2]
+            if not (0 <= x < w and 0 <= y < h):
+                return
+
             # 只处理 editable=True 的当前掩码（如果当前掩码不在 masks 中则默认允许）
             for mask_id, entry in self.masks.items():
                 if entry.get("editable", False):
@@ -425,56 +440,65 @@ class ImageViewer(QLabel):
                 # 没有可编辑掩码，说明是只读状态，不进行修改
                 return
 
-            h, w = self.cv_img.shape[:2]
             half_size = self.eraser_size // 2
             
             # 创建一个临时掩码，用于圆形橡皮擦
             if self.eraser_shape_circle:
                 try:
-                    # 创建一个与图像大小相同的零矩阵
-                    temp_mask = np.zeros((h, w), dtype=np.uint8)
+                    # 计算圆形区域的边界，确保在图像范围内
+                    x1 = max(0, x - half_size)
+                    y1 = max(0, y - half_size)
+                    x2 = min(w, x + half_size)
+                    y2 = min(h, y + half_size)
                     
-                    # 在临时掩码上绘制圆形
-                    cv2.circle(
-                        temp_mask, 
-                        (x, y), 
-                        half_size, 
-                        1, 
-                        -1  # 填充圆
-                    )
+                    if x2 <= x1 or y2 <= y1:  # 无效区域
+                        return
+                        
+                    # 提取当前区域的子掩码以提高性能
+                    sub_h, sub_w = y2-y1, x2-x1
+                    sub_center_x = x - x1
+                    sub_center_y = y - y1
                     
-                    # 根据模式应用临时掩码
-                    temp_mask_bool = temp_mask.astype(bool)
+                    # 创建圆形掩码
+                    y_indices, x_indices = np.ogrid[:sub_h, :sub_w]
+                    dist_from_center = np.sqrt((x_indices - sub_center_x)**2 + (y_indices - sub_center_y)**2)
+                    circle_mask = dist_from_center <= half_size
+                    
+                    # 应用掩码
                     if self.mode == "erase":
-                        # 擦除模式：将圆形区域内的像素设为False
-                        self.mask[temp_mask_bool] = False
+                        self.mask[y1:y2, x1:x2][circle_mask] = False
                     elif self.mode == "add":
-                        # 增加模式：将圆形区域内的像素设为True
-                        self.mask[temp_mask_bool] = True
+                        self.mask[y1:y2, x1:x2][circle_mask] = True
                 except Exception as e:
                     print(f"[错误] 圆形橡皮擦失败: {e}")
-                    # 出错时回退到方形橡皮擦
                     self.eraser_shape_circle = False
             
             # 方形橡皮擦或圆形失败时的备选方案
             if not self.eraser_shape_circle:
-                # 方形橡皮擦：遍历矩形区域内的每个像素
-                for i in range(max(0, y - half_size), min(h, y + half_size + 1)):
-                    for j in range(max(0, x - half_size), min(w, x + half_size + 1)):
-                        if 0 <= j < w and 0 <= i < h:
-                            if self.mode == "erase":
-                                self.mask[i, j] = False
-                            elif self.mode == "add":
-                                self.mask[i, j] = True
+                # 计算方形区域的边界，确保在图像范围内
+                x1 = max(0, x - half_size)
+                y1 = max(0, y - half_size)
+                x2 = min(w, x + half_size)
+                y2 = min(h, y + half_size)
+                
+                # 方形橡皮擦：使用矩阵操作代替遍历
+                if self.mode == "erase":
+                    self.mask[y1:y2, x1:x2] = False
+                elif self.mode == "add":
+                    self.mask[y1:y2, x1:x2] = True
 
-            # 更新当前掩码
+            # 同步更新masks字典
             if self.pending_mask_id in self.masks:
                 self.masks[self.pending_mask_id]['mask'] = self.mask
-
-            if repaint:
-                self.repaint()
+                
+            # 避免频繁重绘，减少性能消耗，但降低阈值以提高流畅度
+            current_time = time.time() * 1000  # 转换为毫秒
+            if repaint and current_time - self.last_paint_time > self.paint_throttle_ms:
+                self.last_paint_time = current_time
+                self.update()
+                
         except Exception as e:
-            print(f"[错误] 修改掩码时出错: {e}")
+            print(f"[错误] 修改掩码时出错: {str(e)}")
             import traceback
             print(traceback.format_exc())
 
@@ -587,45 +611,77 @@ class ImageViewer(QLabel):
             self.update()
 
     def draw_line_between_points(self, x0, y0, x1, y1):
-        """在两个点之间插值修改掩码"""
-        dx = x1 - x0
-        dy = y1 - y0
-        distance = max(abs(dx), abs(dy))
-        if distance == 0:
-            self.modify_mask(x0, y0, repaint=False)
-            return
-        for i in range(distance + 1):
-            x = int(x0 + dx * i / distance)
-            y = int(y0 + dy * i / distance)
-            self.modify_mask(x, y, repaint=False)
+        """在两个点之间插值修改掩码，使用NumPy向量化操作提高性能"""
+        try:
+            dx = x1 - x0
+            dy = y1 - y0
+            distance = max(abs(dx), abs(dy))
+            
+            if distance == 0:
+                self.modify_mask(x0, y0, repaint=False)
+                return
+            
+            # 增加插值点数量，确保线条连续性
+            # 对于所有距离都使用足够多的点来保证连续性
+            steps = min(distance * 2, 50)  # 增加插值点数量，但设置上限避免过多计算
+            
+            # 使用NumPy生成插值点序列
+            t = np.linspace(0, 1, int(steps))
+            x_points = np.array(x0 + dx * t, dtype=int)
+            y_points = np.array(y0 + dy * t, dtype=int)
+            
+            # 遍历插值点，每隔几个点重绘一次以保持性能
+            for i, (x, y) in enumerate(zip(x_points, y_points)):
+                self.modify_mask(x, y, repaint=(i % 5 == 0))  # 每5个点更新一次显示
+            
+            # 确保最后一个点被绘制并刷新显示
+            self.modify_mask(x1, y1, repaint=True)
+                
+        except Exception as e:
+            print(f"[错误] 绘制线条时出错: {str(e)}")
 
     def mouseMoveEvent(self, event):
         try:
             left_pressed = QApplication.mouseButtons() & Qt.LeftButton
 
             if self.mode in ("erase", "add"):
-                # 始终显示放大镜，即使没有按下鼠标
-                try:
-                    self.magnifier_active = True
-                    self.update_magnifier(event.pos())
-                except Exception as e:
-                    print(f"[警告] 更新放大镜时出错: {e}")
+                # 无论是否在编辑状态，都需要更新橡皮擦位置显示
+                self.setCursor(Qt.BlankCursor)  # 确保光标隐藏
                 
+                # 只有在放大镜处于活动状态时才更新放大镜
+                if self.magnifier_active:
+                    # 更新放大镜，使用节流控制频率
+                    current_time = time.time()
+                    if current_time - self.last_magnifier_update > self.magnifier_update_delay / 1000:
+                        try:
+                            self.update_magnifier(event.pos())
+                        except Exception as e:
+                            print(f"[警告] 更新放大镜时出错: {e}")
+                    else:
+                        self.pending_update = True
+                
+                # 强制更新绘制以显示橡皮擦位置
+                self.update()
+                
+                # 处理绘制操作
                 if left_pressed and self.is_editing:
                     img_pos = self.map_to_image(event.pos())
                     x, y = int(img_pos.x()), int(img_pos.y())
 
+                    # 检查坐标是否有效
+                    h, w = self.cv_img.shape[:2] if self.cv_img is not None else (0, 0)
+                    if not (0 <= x < w and 0 <= y < h):
+                        return
+
                     if self.last_erase_pos is not None:
                         last_x, last_y = self.last_erase_pos
+                        # 减少阈值，确保更小的移动也能被捕获
                         self.draw_line_between_points(last_x, last_y, x, y)
+                        self.last_erase_pos = (x, y)
                     else:
                         self.modify_mask(x, y, save_history=False)
+                        self.last_erase_pos = (x, y)
 
-                    self.last_erase_pos = (x, y)
-                else:
-                    self.last_erase_pos = None
-
-                self.update()
             else:
                 if self.dragging and left_pressed:
                     delta = event.pos() - self.last_mouse_pos
@@ -644,13 +700,13 @@ class ImageViewer(QLabel):
             if event.button() == Qt.LeftButton:
                 self.is_editing = False  # 结束编辑
                 
-                # 只设置状态，不发送信号
                 if self.mode not in ("add", "erase"):
-                    self.magnifier_active = False
-                    try:
-                        self.magnifierUpdated.emit(QPixmap())
-                    except Exception as e:
-                        print(f"[警告] 发送放大镜信号时出错: {e}")
+                    # 只有在非编辑模式下才关闭放大镜
+                    if self.magnifier_active:
+                        try:
+                            self.magnifierUpdated.emit(QPixmap())
+                        except Exception as e:
+                            print(f"[警告] 发送放大镜信号时出错: {e}")
                 
                 self.last_erase_pos = None  # 重置擦除位置
                 
@@ -669,14 +725,13 @@ class ImageViewer(QLabel):
         """鼠标进入控件"""
         if self.mode in ("add", "erase"):
             self.setCursor(Qt.BlankCursor)
-            self.magnifier_active = True
+            # 不应该在此处改变magnifier_active状态，而是使用已有状态
 
     def leaveEvent(self, event):
         """鼠标离开控件"""
         self.setCursor(Qt.ArrowCursor)  # 恢复正常箭头
-        if self.mode in ("add", "erase"):
-            # 只设置状态，不发送信号
-            self.magnifier_active = False
+        if self.mode in ("add", "erase") and self.magnifier_active:
+            # 只在已启用放大镜的情况下发送隐藏信号
             try:
                 self.magnifierUpdated.emit(QPixmap())
             except Exception as e:
@@ -696,12 +751,10 @@ class ImageViewer(QLabel):
             self.setCursor(Qt.ArrowCursor)
             if self.erase_button:
                 self.erase_button.setStyleSheet("")
-            # 只设置状态，不发送信号
-            self.magnifier_active = False
-            try:
+            # 只在放大镜处于活动状态时才关闭它
+            if self.magnifier_active:
+                # 触发信号通知主窗口隐藏放大镜
                 self.magnifierUpdated.emit(QPixmap())
-            except Exception as e:
-                print(f"[警告] 发送放大镜信号时出错: {e}")
         else:
             # 当前不是擦除模式，点击进入擦除模式
             self.mode = "erase"
@@ -711,7 +764,11 @@ class ImageViewer(QLabel):
                 self.erase_button.setStyleSheet("background-color: lightblue;")
             if self.add_button:
                 self.add_button.setStyleSheet("")  # 取消增加按钮高亮
-            self.magnifier_active = True
+            # 只在放大镜处于活动状态时才触发它
+            if self.magnifier_active:
+                # 不改变magnifier_active状态，只根据当前状态通知UI
+                # 在mouseMoveEvent中会更新放大镜内容
+                pass
 
     def update_mask(self, x, y):
         """更新掩码"""
@@ -945,6 +1002,15 @@ class ImageViewer(QLabel):
     def update_magnifier(self, pos):
         """更新放大镜预览"""
         try:
+            current_time = time.time()
+            # 节流控制，避免频繁更新放大镜
+            if current_time - self.last_magnifier_update < self.magnifier_update_delay / 1000:
+                self.pending_update = True
+                return
+                
+            self.last_magnifier_update = current_time
+            self.pending_update = False
+            
             if not self.magnifier_active or self.cv_img is None:
                 self.current_magnifier_pixmap = None
                 # 发送空的QPixmap而不是None
@@ -963,14 +1029,26 @@ class ImageViewer(QLabel):
                 self.magnifierUpdated.emit(QPixmap())
                 return
                 
-            # 计算放大区域的范围
-            half_size = int(self.magnifier_size / (2 * self.magnifier_zoom))
+            # 计算放大区域的范围 - 根据橡皮擦大小动态调整
+            eraser_radius = self.eraser_size // 2
+            # 确保放大区域至少比橡皮擦大1.5倍，以便完整显示橡皮擦
+            min_half_size = max(int(eraser_radius * 1.5), int(self.magnifier_size // (2 * self.magnifier_zoom)))
+            half_size = min_half_size
             
-            # 确保不超出图像边界
-            x1 = max(0, x - half_size)
-            y1 = max(0, y - half_size)
-            x2 = min(w, x + half_size)
-            y2 = min(h, y + half_size)
+            # 动态调整放大倍率，确保橡皮擦完整显示
+            effective_zoom = self.magnifier_zoom
+            if eraser_radius * 2 * self.magnifier_zoom > self.magnifier_size * 0.8:
+                # 橡皮擦太大，需要降低放大倍率
+                effective_zoom = self.magnifier_size * 0.8 / (eraser_radius * 2)
+                # 增加显示区域以保持合适的视野
+                half_size = int(eraser_radius * 1.2)
+                print(f"[放大镜] 调整放大倍率为 {effective_zoom:.1f}，以适应橡皮擦大小 {self.eraser_size}")
+            
+            # 确保不超出图像边界，并强制转换为整数类型
+            x1 = max(0, int(x - half_size))
+            y1 = max(0, int(y - half_size))
+            x2 = min(w, int(x + half_size))
+            y2 = min(h, int(y + half_size))
             
             # 检查区域大小
             if x2 <= x1 or y2 <= y1:
@@ -985,19 +1063,19 @@ class ImageViewer(QLabel):
             # 创建一个透明的覆盖层
             overlay = region.copy()
             
-            # 在覆盖层上绘制橡皮擦轮廓
-            center_x = x - x1
-            center_y = y - y1
+            # 在覆盖层上绘制橡皮擦轮廓 - 减小边框宽度
+            center_x = int(x - x1)
+            center_y = int(y - y1)
             eraser_radius = self.eraser_size // 2
             
-            # 绘制橡皮擦轮廓（白色边框）
+            # 绘制橡皮擦轮廓（白色边框，改为1px宽）
             if self.eraser_shape_circle:
-                cv2.circle(overlay, (center_x, center_y), eraser_radius, (255, 255, 255), 2)
+                cv2.circle(overlay, (center_x, center_y), eraser_radius, (255, 255, 255), 1)
             else:
                 # 绘制方形橡皮擦轮廓
                 top_left = (center_x - eraser_radius, center_y - eraser_radius)
                 bottom_right = (center_x + eraser_radius, center_y + eraser_radius)
-                cv2.rectangle(overlay, top_left, bottom_right, (255, 255, 255), 2)
+                cv2.rectangle(overlay, top_left, bottom_right, (255, 255, 255), 1)
             
             # 如果正在编辑现有掩码，显示原始掩码区域
             if self.mask is not None and self.pending_mask_id is not None:
@@ -1017,13 +1095,13 @@ class ImageViewer(QLabel):
                 except Exception as e:
                     print(f"[警告] 显示掩码区域出错: {e}")
             
-            # 绘制十字线指示当前位置
+            # 绘制十字线指示当前位置 - 使用更细的十字线
             if 0 <= center_x < overlay.shape[1] and 0 <= center_y < overlay.shape[0]:
                 cv2.line(overlay, (center_x, 0), (center_x, overlay.shape[0]), (255, 255, 255), 1)
                 cv2.line(overlay, (0, center_y), (overlay.shape[1], center_y), (255, 255, 255), 1)
             
-            # 放大图像
-            magnified = cv2.resize(overlay, None, fx=self.magnifier_zoom, fy=self.magnifier_zoom, 
+            # 放大图像，使用动态调整的放大倍率
+            magnified = cv2.resize(overlay, None, fx=effective_zoom, fy=effective_zoom, 
                                  interpolation=cv2.INTER_LINEAR)
             
             # 转换为 QPixmap

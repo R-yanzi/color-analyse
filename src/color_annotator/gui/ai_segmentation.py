@@ -266,16 +266,18 @@ class AISegmentationWidget(QWidget):
             if ref_data:
                 img = ref_data['image']
                 if img is not None:
-                    # 确保颜色空间正确
-                    if len(img.shape) == 3 and img.shape[2] == 3:
-                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    # 始终确保颜色空间是正确的BGR->RGB转换
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                     
-                    h, w = img.shape[:2]
+                    h, w = img_rgb.shape[:2]
                     bytes_per_line = 3 * w
-                    q_img = QImage(img.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                    q_img = QImage(img_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
                     pixmap = QPixmap.fromImage(q_img)
+                    
+                    # 更高质量的缩放
                     scaled_pixmap = pixmap.scaled(
-                        self.reference_label.size(),
+                        self.reference_label.width() - 10,
+                        self.reference_label.height() - 10,
                         Qt.KeepAspectRatio,
                         Qt.SmoothTransformation
                     )
@@ -294,7 +296,7 @@ class AISegmentationWidget(QWidget):
             try:
                 target_path = Path(file_path)
                 
-                # 读取图像
+                # 读取图像，直接使用BGR格式保存，显示时再转换
                 img = cv2.imread(file_path)
                 if img is None:
                     raise ValueError("无法读取图像")
@@ -305,6 +307,9 @@ class AISegmentationWidget(QWidget):
                 # 更新UI
                 self.update_reference_combo()
                 self.ref_combo.setCurrentText(target_path.stem)
+                
+                # 立即更新显示
+                self.change_reference_image(self.ref_combo.currentIndex())
                 
                 QMessageBox.information(self, "成功", "参考图像添加成功！")
             except Exception as e:
@@ -506,10 +511,14 @@ class AISegmentationWidget(QWidget):
         """设置要分割的图像"""
         self.current_image = image
         if image is not None:
-            # 显示预览
+            # 显示预览，确保颜色正确
             h, w = image.shape[:2]
+            
+            # 确保图像是RGB格式显示
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             bytes_per_line = 3 * w
-            q_img = QImage(image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            
+            q_img = QImage(image_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(q_img)
             scaled_pixmap = pixmap.scaled(300, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.preview_label.setPixmap(scaled_pixmap)
@@ -987,8 +996,8 @@ class AISegmentationWidget(QWidget):
             id_item = QTableWidgetItem(str(row + 1))
             id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
             id_item.setTextAlignment(Qt.AlignCenter)
-            # 存储掩码ID作为item的data
             id_item.setData(Qt.UserRole, mask_id)
+            id_item.setData(Qt.UserRole + 1, (r, g, b))  # 存储RGB值
             table.setItem(row, 0, id_item)
             
             # 主色块
@@ -1002,7 +1011,7 @@ class AISegmentationWidget(QWidget):
                 border: 1px solid #dee2e6;
                 border-radius: 2px;
             """)
-            color_label.setFixedSize(30, 30)
+            color_label.setFixedSize(40, 40)  # 增大主色块
             
             color_layout.addStretch()
             color_layout.addWidget(color_label)
@@ -1010,31 +1019,24 @@ class AISegmentationWidget(QWidget):
             
             table.setCellWidget(row, 1, color_container)
             
-            # R/G/B 列
-            for col, val in zip((2, 3, 4), (r, g, b)):
-                item = QTableWidgetItem(str(val))
-                item.setTextAlignment(Qt.AlignCenter)
-                item.setFlags(item.flags() | Qt.ItemIsEditable)
-                table.setItem(row, col, item)
-            
             # 占比列
             percentage_item = QTableWidgetItem(f"{percentage:.1%}")
             percentage_item.setFlags(percentage_item.flags() & ~Qt.ItemIsEditable)
             percentage_item.setTextAlignment(Qt.AlignCenter)
-            table.setItem(row, 5, percentage_item)
+            table.setItem(row, 2, percentage_item)
             
             # 可见性切换按钮
             visibility_btn = QPushButton()
             visibility_btn.setCheckable(True)
             visibility_btn.setChecked(True)
-            visibility_btn.setFixedSize(50, 35)
+            visibility_btn.setFixedSize(50, 40)
             visibility_btn.setStyleSheet("""
                 QPushButton {
                     border: none;
                     background-color: transparent;
                     color: #28a745;
-                    font-family: "Segoe UI Symbol";
-                    font-size: 20px;
+                    font-family: \"Segoe UI Symbol\";
+                    font-size: 24px;
                     padding: 0px;
                 }
                 QPushButton:checked {
@@ -1047,14 +1049,14 @@ class AISegmentationWidget(QWidget):
             """)
             visibility_btn.setText("●")
             # 使用lambda捕获当前的mask_id
-            visibility_btn.clicked.connect(lambda checked, mid=mask_id: main_window.toggle_mask_visibility(mid, checked))
+            visibility_btn.clicked.connect(lambda checked, mid=mask_id, r=row: main_window.toggle_mask_visibility(r, checked))
             
             visibility_widget = QWidget()
             visibility_layout = QHBoxLayout(visibility_widget)
             visibility_layout.addWidget(visibility_btn)
             visibility_layout.setAlignment(Qt.AlignCenter)
             visibility_layout.setContentsMargins(0, 0, 0, 0)
-            table.setCellWidget(row, 6, visibility_widget)
+            table.setCellWidget(row, 3, visibility_widget)
             
             # 操作按钮
             op_widget = QWidget()
@@ -1076,8 +1078,7 @@ class AISegmentationWidget(QWidget):
                     background-color: #218838;
                 }
             """)
-            # 使用lambda捕获当前的mask_id
-            edit_btn.clicked.connect(lambda _, mid=mask_id: main_window.edit_annotation(mid))
+            edit_btn.clicked.connect(lambda _, r=row, mid=mask_id: main_window.edit_annotation(r, mid))
             
             del_btn = QPushButton("删除")
             del_btn.setStyleSheet("""
@@ -1093,16 +1094,15 @@ class AISegmentationWidget(QWidget):
                     background-color: #c82333;
                 }
             """)
-            # 使用lambda捕获当前的mask_id
-            del_btn.clicked.connect(lambda _, mid=mask_id: main_window.delete_annotation(mid))
+            del_btn.clicked.connect(lambda _, mid=mask_id, r=row: main_window.delete_annotation(mid, r))
             
             op_layout.addWidget(edit_btn)
             op_layout.addWidget(del_btn)
             op_widget.setLayout(op_layout)
-            table.setCellWidget(row, 7, op_widget)
+            table.setCellWidget(row, 4, op_widget)
             
             # 设置行高
-            table.setRowHeight(row, 40)
+            table.setRowHeight(row, 50)
             
             print(f"[表格] 添加标注记录：颜色={color_info.rgb}, 占比={percentage:.1%}, 掩码ID={mask_id}")
             

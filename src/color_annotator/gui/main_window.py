@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QPushButton, QFileDialog, QVBoxLayout,
     QWidget, QHBoxLayout, QSlider, QLabel, QTableWidget, QAbstractItemView,
     QTableWidgetItem, QPushButton, QHeaderView, QLineEdit, QMessageBox, QCheckBox, QGridLayout,
-    QColorDialog, QApplication, QSizePolicy, QDockWidget
+    QColorDialog, QApplication, QSizePolicy, QDockWidget, QShortcut
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from .image_viewer import ImageViewer
@@ -16,6 +16,8 @@ from io import BytesIO
 from src.color_annotator.utils.color_analyzer import ColorAnalyzer  # 新增：导入颜色分析器
 from .ai_segmentation import AISegmentationWidget
 from pathlib import Path
+import time
+from PyQt5.QtGui import QKeySequence
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -30,35 +32,49 @@ class MainWindow(QMainWindow):
             int(screen.height() * 0.8)    # 转换为整数
         )
 
+        # 初始化保存标定相关的属性
+        self.pending_annotation = None
+        self.pending_mask_id = None
+        
+        # 放大镜启用状态
+        self.magnifier_enabled = True
+
         # viewer区域设置为自适应大小
         self.viewer = ImageViewer()
         self.viewer.setMinimumSize(800, 600)  # 设置最小尺寸
         self.viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        # 创建浮动放大镜窗口
+        # 创建浮动放大镜窗口 - 使用相对尺寸
         self.magnifier_window = QLabel(self.viewer)
-        self.magnifier_window.setFixedSize(250, 250)
+        # 初始大小设置，后面会根据窗口大小动态调整
+        self.update_magnifier_size()
         self.magnifier_window.setAlignment(Qt.AlignCenter)
         self.magnifier_window.setStyleSheet("""
-            background-color: rgba(0, 0, 0, 180);
+            background-color: rgba(0, 0, 0, 140);
             color: white;
             border: 1px solid white;
             border-radius: 5px;
+            padding: 1px;
         """)
         self.magnifier_window.hide()  # 初始时隐藏
         
-        # 创建放大镜更新定时器
+        # 创建放大镜更新定时器 - 降低检查频率减少资源消耗
         self.magnifier_timer = QTimer(self)
         self.magnifier_timer.timeout.connect(self.check_magnifier_status)
-        self.magnifier_timer.start(50)  # 50毫秒检查一次
+        self.magnifier_timer.start(100)  # 100毫秒检查一次(原为50ms)
 
         # 控制栏
-        open_btn = QPushButton("打开图片")
+        open_btn = QPushButton("打开图片 (Ctrl+O)")
         open_btn.clicked.connect(self.open_image)
-        reset_btn = QPushButton("重置视图")
+        open_btn.setShortcut("Ctrl+O")
+        
+        reset_btn = QPushButton("重置视图 (R)")
         reset_btn.clicked.connect(self.viewer.reset_view)
-        save_btn = QPushButton("保存数据")
+        reset_btn.setShortcut("R")
+        
+        save_btn = QPushButton("保存数据 (F2)")
         save_btn.clicked.connect(self.save_annotations_to_json)
+        save_btn.setShortcut("F2")
 
         zoom_label = QLabel("缩放：")
         self.scale_slider = QSlider(Qt.Horizontal)
@@ -83,9 +99,9 @@ class MainWindow(QMainWindow):
 
         # 表格区域
         self.annotation_table = QTableWidget()
-        self.annotation_table.setColumnCount(8)
+        self.annotation_table.setColumnCount(5)  # 从8列减少为5列
         self.annotation_table.setHorizontalHeaderLabels([
-            "编号", "主色", "R", "G", "B", "占比", "可见", "操作"
+            "编号", "主色", "占比", "可见", "操作"  # 删除RGB三列
         ])
         self.annotation_table.verticalHeader().setVisible(False)
         self.annotation_table.setEditTriggers(QAbstractItemView.DoubleClicked)
@@ -95,12 +111,12 @@ class MainWindow(QMainWindow):
         # 调整列宽
         header = self.annotation_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Fixed)
-        column_widths = [60, 80, 60, 60, 60, 80, 70, 150]  # 总宽度620
+        column_widths = [50, 150, 80, 70, 170]  # 调整列宽分配
         for i, width in enumerate(column_widths):
             self.annotation_table.setColumnWidth(i, width)
         
-        self.annotation_table.setMinimumWidth(620)  # 设置最小宽度
-        self.annotation_table.setMaximumWidth(620)  # 设置最大宽度
+        self.annotation_table.setMinimumWidth(520)  # 调整总宽度
+        self.annotation_table.setMaximumWidth(520)  # 调整总宽度
         
         # 更新表格样式
         self.annotation_table.setStyleSheet("""
@@ -173,17 +189,24 @@ class MainWindow(QMainWindow):
         left_nav_layout.addWidget(nav_title)
         left_nav_layout.addSpacing(10)
 
-        btn_run = QPushButton("执行分割")
-        btn_save = QPushButton("保存标定")
-        btn_clear = QPushButton("清除标注")
-        self.btn_add = QPushButton("增加掩码")  # 保存为实例变量
-        self.btn_erase = QPushButton("擦除掩码")  # 保存为实例变量
+        btn_run = QPushButton("执行分割 (F5)")
+        btn_save = QPushButton("保存标定 (Ctrl+S)")
+        btn_clear = QPushButton("清除标注 (Ctrl+X)")
+        self.btn_add = QPushButton("增加掩码 (A)")  # 保存为实例变量
+        self.btn_erase = QPushButton("擦除掩码 (E)")  # 保存为实例变量
         eraser_box = QCheckBox("圆形橡皮擦")
+        magnifier_box = QCheckBox("显示放大镜")  # 添加放大镜开关
+
+        # 设置快捷键
+        btn_run.setShortcut("F5")
+        btn_save.setShortcut("Ctrl+S")
+        btn_clear.setShortcut("Ctrl+X")
+        # 增加/擦除掩码的快捷键在toggle_add_mode和toggle_erase_mode方法中设置
 
         # 设置按钮样式
-        button_style = """
+        self.button_style = """
             QPushButton {
-                font-size: 14px;
+                font-size: 16px;
                 padding: 8px;
                 border: 1px solid #2980b9;
                 border-radius: 4px;
@@ -204,7 +227,7 @@ class MainWindow(QMainWindow):
         # 设置激活状态的样式
         self.active_button_style = """
             QPushButton {
-                font-size: 14px;
+                font-size: 16px;
                 padding: 8px;
                 border: 1px solid #16a085;
                 border-radius: 4px;
@@ -220,18 +243,22 @@ class MainWindow(QMainWindow):
 
         for btn in [btn_run, btn_save, btn_clear, self.btn_add, self.btn_erase]:
             btn.setFixedSize(320, 40)  # 加宽按钮
-            btn.setStyleSheet(button_style)
+            btn.setStyleSheet(self.button_style)
             row = QHBoxLayout()
             row.addStretch()
             row.addWidget(btn)
             row.addStretch()
             left_nav_layout.addLayout(row)
 
-        box_row = QHBoxLayout()
-        box_row.addStretch()
-        box_row.addWidget(eraser_box)
-        box_row.addStretch()
-        left_nav_layout.addLayout(box_row)
+        # 创建复选框行
+        checkbox_row = QHBoxLayout()
+        checkbox_row.addStretch()
+        checkbox_row.addWidget(eraser_box)
+        checkbox_row.addSpacing(20)  # 添加间距
+        checkbox_row.addWidget(magnifier_box)
+        checkbox_row.addStretch()
+        left_nav_layout.addLayout(checkbox_row)
+        
         left_nav_layout.addStretch()
 
         # 添加预览图到左侧导航栏下方
@@ -279,7 +306,7 @@ class MainWindow(QMainWindow):
         
         # 饼图容器
         pie_container = QWidget()
-        pie_container.setFixedSize(620, 500)  # 调整饼图容器尺寸，使其更接近正方形
+        pie_container.setFixedSize(520, 480)  # 调整饼图容器尺寸，使其更窄
         pie_layout = QVBoxLayout(pie_container)
         pie_layout.addWidget(self.color_pie_chart_label)
         pie_layout.setContentsMargins(0, 0, 0, 0)
@@ -290,7 +317,7 @@ class MainWindow(QMainWindow):
         
         right_widget = QWidget()
         right_widget.setLayout(right_layout)
-        right_widget.setFixedWidth(640)
+        right_widget.setFixedWidth(540)  # 减小右侧区域宽度
 
         # 主图区域（让它填充所有剩余空间）
         center_layout = QVBoxLayout()
@@ -357,6 +384,17 @@ class MainWindow(QMainWindow):
         self.dock_ai.setWidget(self.ai_segmentation)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_ai)
 
+        # 配置快捷键
+        self.add_shortcut = QShortcut(QKeySequence("A"), self)
+        self.add_shortcut.activated.connect(self.toggle_add_mode)
+        
+        self.erase_shortcut = QShortcut(QKeySequence("E"), self)
+        self.erase_shortcut.activated.connect(self.toggle_erase_mode)
+        
+        # 配置放大镜开关
+        magnifier_box.setChecked(True)  # 默认打开放大镜
+        magnifier_box.stateChanged.connect(self.toggle_magnifier)
+
     def run_segmentation(self):
         """执行基于点的人工标定分割"""
         try:
@@ -402,9 +440,16 @@ class MainWindow(QMainWindow):
             if is_editing:
                 # 编辑现有标定：保持原有颜色
                 print(f"[保存] 更新现有标定 {self.pending_mask_id}")
-                r = int(self.annotation_table.item(row, 2).text())
-                g = int(self.annotation_table.item(row, 3).text())
-                b = int(self.annotation_table.item(row, 4).text())
+                
+                # 从ID项获取存储的RGB值 - 修改这部分代码
+                id_item = self.annotation_table.item(row, 0)
+                if id_item and id_item.data(Qt.UserRole + 1):
+                    r, g, b = id_item.data(Qt.UserRole + 1)
+                else:
+                    # 如果无法获取，使用默认颜色
+                    r, g, b = 0, 255, 0
+                    print("[警告] 无法获取颜色信息，使用默认颜色")
+                
                 self.viewer.masks[self.pending_mask_id]['color'] = (r, g, b)
                 
                 # 重新计算所有掩码的占比
@@ -431,7 +476,7 @@ class MainWindow(QMainWindow):
             else:
                 # 新增标定：提取新的颜色
                 print("[保存] 创建新标定")
-                if self.pending_annotation is None:
+                if not hasattr(self, 'pending_annotation') or self.pending_annotation is None:
                     try:
                         color_info = self.viewer.extract_main_color()
                         if color_info:
@@ -463,6 +508,8 @@ class MainWindow(QMainWindow):
             
         except Exception as e:
             print(f"[错误] 保存标定时出错: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
             QMessageBox.critical(self, "保存失败", f"保存标定时出错：{str(e)}")
 
     def add_annotation_to_table(self, color_info, mask_id):
@@ -478,6 +525,7 @@ class MainWindow(QMainWindow):
         id_item.setFlags(id_item.flags() & ~Qt.ItemIsEditable)
         id_item.setTextAlignment(Qt.AlignCenter)
         id_item.setData(Qt.UserRole, mask_id)  # 存储mask_id
+        id_item.setData(Qt.UserRole + 1, (r, g, b))  # 额外存储RGB值
         self.annotation_table.setItem(row, 0, id_item)
 
         # 主色块（可点击）- 使用容器实现居中
@@ -491,7 +539,7 @@ class MainWindow(QMainWindow):
             border: 1px solid #dee2e6;
             border-radius: 2px;
         """)
-        color_label.setFixedSize(30, 30)  # 正方形颜色块
+        color_label.setFixedSize(40, 40)  # 增加主色块尺寸
         
         color_layout.addStretch()
         color_layout.addWidget(color_label)
@@ -499,32 +547,25 @@ class MainWindow(QMainWindow):
         
         color_label.clicked.connect(lambda: self.show_color_dialog(row))
         self.annotation_table.setCellWidget(row, 1, color_container)
-
-        # R/G/B 列（可编辑）
-        for col, val in zip((2, 3, 4), (r, g, b)):
-            item = QTableWidgetItem(str(val))
-            item.setTextAlignment(Qt.AlignCenter)
-            item.setFlags(item.flags() | Qt.ItemIsEditable)
-            self.annotation_table.setItem(row, col, item)
             
         # 占比列（不可编辑）
         percentage_item = QTableWidgetItem(f"{percentage:.1%}")
         percentage_item.setFlags(percentage_item.flags() & ~Qt.ItemIsEditable)
         percentage_item.setTextAlignment(Qt.AlignCenter)
-        self.annotation_table.setItem(row, 5, percentage_item)
+        self.annotation_table.setItem(row, 2, percentage_item)
 
         # 可见性切换按钮
         visibility_btn = QPushButton()
         visibility_btn.setCheckable(True)
         visibility_btn.setChecked(True)
-        visibility_btn.setFixedSize(50, 35)
+        visibility_btn.setFixedSize(50, 40)
         visibility_btn.setStyleSheet("""
             QPushButton {
                 border: none;
                 background-color: transparent;
                 color: #28a745;
                 font-family: "Segoe UI Symbol";
-                font-size: 20px;
+                font-size: 24px;
                 padding: 0px;
             }
             QPushButton:checked {
@@ -537,14 +578,13 @@ class MainWindow(QMainWindow):
         """)
         visibility_btn.setText("●")  # 使用实心圆点表示可见
         visibility_btn.clicked.connect(lambda checked: self.toggle_mask_visibility(row, checked))
-        visibility_btn.setProperty("mask_id", mask_id)  # 保持这个设置，以防其他地方也在使用
         
         visibility_widget = QWidget()
         visibility_layout = QHBoxLayout(visibility_widget)
         visibility_layout.addWidget(visibility_btn)
         visibility_layout.setAlignment(Qt.AlignCenter)
         visibility_layout.setContentsMargins(0, 0, 0, 0)
-        self.annotation_table.setCellWidget(row, 6, visibility_widget)
+        self.annotation_table.setCellWidget(row, 3, visibility_widget)
 
         # 操作按钮
         op_widget = QWidget()
@@ -587,10 +627,10 @@ class MainWindow(QMainWindow):
         op_layout.addWidget(edit_btn)
         op_layout.addWidget(del_btn)
         op_widget.setLayout(op_layout)
-        self.annotation_table.setCellWidget(row, 7, op_widget)
+        self.annotation_table.setCellWidget(row, 4, op_widget)
 
         # 设置行高
-        self.annotation_table.setRowHeight(row, 40)  # 增加行高
+        self.annotation_table.setRowHeight(row, 50)  # 增加行高
 
     def delete_annotation(self, mask_id, row):
         """删除标注"""
@@ -694,40 +734,60 @@ class MainWindow(QMainWindow):
         )
 
     def update_color_pie_chart(self):
-        """更新颜色饼图"""
+        """更新颜色饼图，确保掩码占比总和为100%"""
         if self.viewer.cv_img is None:
             self.color_pie_chart_label.setText("无图片")
             return
 
-        # 从表格中收集颜色信息
+        # 从masks字典中计算所有可见掩码的像素总数
+        total_pixels = self.viewer.cv_img.shape[0] * self.viewer.cv_img.shape[1]  # 图像总像素
         colors_data = []
+        mask_pixels = {}
+
+        # 先计算每个掩码的像素数量和对应颜色
         for row in range(self.annotation_table.rowCount()):
-            try:
-                # 获取RGB值
-                r = int(self.annotation_table.item(row, 2).text() or 0)
-                g = int(self.annotation_table.item(row, 3).text() or 0)
-                b = int(self.annotation_table.item(row, 4).text() or 0)
-                # 获取占比
-                percentage_text = self.annotation_table.item(row, 5).text().rstrip('%')
-                percentage = float(percentage_text) / 100.0
-                
-                colors_data.append({
-                    'rgb': (r, g, b),
-                    'percentage': percentage
-                })
-            except (ValueError, AttributeError) as e:
-                print(f"[警告] 行 {row + 1} 数据无效: {e}")
-                continue
+            id_item = self.annotation_table.item(row, 0)
+            if id_item:
+                mask_id = id_item.data(Qt.UserRole)
+                if mask_id and mask_id in self.viewer.masks:
+                    mask_data = self.viewer.masks[mask_id]
+                    
+                    # 只计算可见的掩码
+                    if mask_data.get('visible', True):
+                        mask = mask_data.get('mask')
+                        mask_pixel_count = np.sum(mask)  # 掩码中的像素数
+                        
+                        # 从ID项获取RGB值
+                        r, g, b = id_item.data(Qt.UserRole + 1)
+                        
+                        # 保存掩码数据
+                        mask_pixels[mask_id] = {
+                            'count': mask_pixel_count,
+                            'rgb': (r, g, b)
+                        }
 
-        if not colors_data:
-            self.color_pie_chart_label.setText("无标注数据")
+        # 计算所有可见掩码的总像素数
+        total_mask_pixels = sum(data['count'] for data in mask_pixels.values())
+        
+        if total_mask_pixels == 0:
+            self.color_pie_chart_label.setText("无可见掩码")
             return
-
-        # 设置matplotlib中文字体
+        
+        # 计算每个掩码的占比（基于总掩码像素）
+        for mask_id, data in mask_pixels.items():
+            percentage = data['count'] / total_mask_pixels
+            colors_data.append({
+                'rgb': data['rgb'],
+                'percentage': percentage
+            })
+        
+        # 更新表格中的占比数据
+        self.update_percentage_in_table(mask_pixels, total_mask_pixels)
+            
+        # 绘制饼图
         plt.rcParams['font.sans-serif'] = ['SimHei']
         plt.rcParams['axes.unicode_minus'] = False
 
-        # 绘制饼图
         plt.clf()
         fig, ax = plt.subplots(figsize=(10, 10))
 
@@ -735,16 +795,16 @@ class MainWindow(QMainWindow):
         sizes = [data['percentage'] for data in colors_data]
         colors = [f"#{r:02x}{g:02x}{b:02x}" for data in colors_data for r, g, b in [data['rgb']]]
 
-        # 绘制饼图，不显示文字标签
+        # 绘制饼图
         wedges, texts = ax.pie(
             sizes,
             colors=colors,
-            labels=[''] * len(colors),  # 不显示标签
-            autopct=None,  # 不显示百分比
+            labels=[''] * len(colors),
+            autopct=None,
             startangle=90
         )
 
-        # 添加图例，显示颜色和百分比
+        # 添加图例
         legend_labels = [f'{data["percentage"]:.1%}' for data in colors_data]
         legend = ax.legend(
             wedges,
@@ -752,17 +812,17 @@ class MainWindow(QMainWindow):
             title="颜色占比",
             loc="center left",
             bbox_to_anchor=(1, 0, 0.5, 1),
-            fontsize=14,  # 增大图例文字大小
-            title_fontsize=16  # 增大图例标题大小
+            fontsize=14,
+            title_fontsize=16
         )
 
         # 调整图例样式
-        legend.get_frame().set_linewidth(2)  # 加粗图例边框
-        legend.get_frame().set_edgecolor('black')  # 设置图例边框颜色
+        legend.get_frame().set_linewidth(2)
+        legend.get_frame().set_edgecolor('black')
 
         ax.axis('equal')
 
-        # 保存图片，增加边距以显示完整图例
+        # 保存图片
         buf = BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=100, pad_inches=0.3)
         buf.seek(0)
@@ -778,6 +838,26 @@ class MainWindow(QMainWindow):
         )
         self.color_pie_chart_label.setPixmap(scaled_pixmap)
         self.color_pie_chart_label.setAlignment(Qt.AlignCenter)
+    
+    def update_percentage_in_table(self, mask_pixels, total_mask_pixels):
+        """更新表格中的占比数据"""
+        for row in range(self.annotation_table.rowCount()):
+            id_item = self.annotation_table.item(row, 0)
+            if id_item:
+                mask_id = id_item.data(Qt.UserRole)
+                if mask_id in mask_pixels:
+                    # 计算百分比
+                    percentage = mask_pixels[mask_id]['count'] / total_mask_pixels
+                    
+                    # 更新表格中的占比显示
+                    percentage_item = self.annotation_table.item(row, 2)
+                    if percentage_item:
+                        percentage_item.setText(f"{percentage:.1%}")
+                    else:
+                        percentage_item = QTableWidgetItem(f"{percentage:.1%}")
+                        percentage_item.setFlags(percentage_item.flags() & ~Qt.ItemIsEditable)
+                        percentage_item.setTextAlignment(Qt.AlignCenter)
+                        self.annotation_table.setItem(row, 2, percentage_item)
 
     def toggle_mask_visibility(self, row, checked):
         """切换掩码可见性"""
@@ -791,13 +871,11 @@ class MainWindow(QMainWindow):
             if not mask_id:
                 return
 
-            # 从当前行提取 R/G/B 值，添加默认值处理
-            r = int(self.annotation_table.item(row, 2).text() or 0)
-            g = int(self.annotation_table.item(row, 3).text() or 0)
-            b = int(self.annotation_table.item(row, 4).text() or 0)
+            # 从ID项获取RGB值
+            r, g, b = id_item.data(Qt.UserRole + 1)
 
             # 获取可见性按钮并更新显示
-            visibility_widget = self.annotation_table.cellWidget(row, 6)
+            visibility_widget = self.annotation_table.cellWidget(row, 3)
             if visibility_widget:
                 visibility_btn = visibility_widget.findChild(QPushButton)
                 if visibility_btn:
@@ -960,7 +1038,7 @@ class MainWindow(QMainWindow):
                         # 找到对应行，设置显示列为 ✔ / ✖
                         row = self.find_row_by_mask_id(mask_id)
                         if row != -1:
-                            show_item = self.annotation_table.item(row, 6)
+                            show_item = self.annotation_table.item(row, 3)
                             if show_item:
                                 show_item.setText("✔" if visible else "✖")
 
@@ -1023,7 +1101,7 @@ class MainWindow(QMainWindow):
             """)
 
         # 更新掩码颜色并刷新视图
-        show_item = self.annotation_table.item(row, 6)
+        show_item = self.annotation_table.item(row, 3)
         if show_item:
             mask_id = show_item.data(Qt.UserRole)
             if mask_id and mask_id in self.viewer.masks:
@@ -1040,16 +1118,16 @@ class MainWindow(QMainWindow):
         r, g, b = color_info.rgb
         percentage = color_info.percentage
 
-        # 更新RGB值
-        self.annotation_table.setItem(row, 2, QTableWidgetItem(str(r)))
-        self.annotation_table.setItem(row, 3, QTableWidgetItem(str(g)))
-        self.annotation_table.setItem(row, 4, QTableWidgetItem(str(b)))
+        # 更新ID项中存储的RGB值
+        id_item = self.annotation_table.item(row, 0)
+        if id_item:
+            id_item.setData(Qt.UserRole + 1, (r, g, b))
 
         # 更新占比
         percentage_item = QTableWidgetItem(f"{percentage:.1%}")
         percentage_item.setFlags(percentage_item.flags() & ~Qt.ItemIsEditable)
         percentage_item.setTextAlignment(Qt.AlignCenter)
-        self.annotation_table.setItem(row, 5, percentage_item)
+        self.annotation_table.setItem(row, 2, percentage_item)
 
         # 更新颜色块 - 使用与新增时相同的 ClickableColorLabel
         color_container = QWidget()
@@ -1062,7 +1140,7 @@ class MainWindow(QMainWindow):
             border: 1px solid #dee2e6;
             border-radius: 2px;
         """)
-        color_label.setFixedSize(30, 30)  # 与新增时保持一致的尺寸
+        color_label.setFixedSize(40, 40)  # 与新增时保持一致的尺寸
         
         color_layout.addStretch()
         color_layout.addWidget(color_label)
@@ -1093,10 +1171,27 @@ class MainWindow(QMainWindow):
     def show_color_dialog(self, row):
         """显示颜色选择对话框"""
         try:
-            # 获取当前RGB值
-            r = int(self.annotation_table.item(row, 2).text())
-            g = int(self.annotation_table.item(row, 3).text())
-            b = int(self.annotation_table.item(row, 4).text())
+            # 从ID项获取存储的RGB值
+            id_item = self.annotation_table.item(row, 0)
+            if id_item and id_item.data(Qt.UserRole + 1):
+                r, g, b = id_item.data(Qt.UserRole + 1)
+            else:
+                # 获取主色块的颜色
+                color_container = self.annotation_table.cellWidget(row, 1)
+                if color_container:
+                    color_label = color_container.findChild(ClickableColorLabel)
+                    if color_label:
+                        style = color_label.styleSheet()
+                        import re
+                        rgb = re.search(r'rgb\((\d+),\s*(\d+),\s*(\d+)\)', style)
+                        if rgb:
+                            r, g, b = map(int, rgb.groups())
+                        else:
+                            r, g, b = 0, 0, 0
+                    else:
+                        r, g, b = 0, 0, 0
+                else:
+                    r, g, b = 0, 0, 0
             
             # 创建颜色对话框
             color_dialog = QColorDialog(self)
@@ -1109,28 +1204,25 @@ class MainWindow(QMainWindow):
                 new_color = color_dialog.currentColor()
                 new_r, new_g, new_b = new_color.red(), new_color.green(), new_color.blue()
                 
-                # 更新RGB值
-                self.annotation_table.item(row, 2).setText(str(new_r))
-                self.annotation_table.item(row, 3).setText(str(new_g))
-                self.annotation_table.item(row, 4).setText(str(new_b))
+                # 更新存储在ID项中的RGB值
+                id_item.setData(Qt.UserRole + 1, (new_r, new_g, new_b))
                 
                 # 更新颜色块显示
-                color_label = self.annotation_table.cellWidget(row, 1)
-                if isinstance(color_label, QLabel):
-                    color_label.setStyleSheet(f"""
-                        background-color: rgb({new_r}, {new_g}, {new_b});
-                        border: 1px solid gray;
-                        margin-left: 5px;
-                        margin-right: 5px;
-                    """)
+                color_container = self.annotation_table.cellWidget(row, 1)
+                if color_container:
+                    color_label = color_container.findChild(ClickableColorLabel)
+                    if color_label:
+                        color_label.setStyleSheet(f"""
+                            background-color: rgb({new_r}, {new_g}, {new_b});
+                            border: 1px solid #dee2e6;
+                            border-radius: 2px;
+                        """)
                 
                 # 更新掩码颜色
-                show_item = self.annotation_table.item(row, 6)
-                if show_item:
-                    mask_id = show_item.data(Qt.UserRole)
-                    if mask_id and mask_id in self.viewer.masks:
-                        self.viewer.masks[mask_id]['color'] = (new_r, new_g, new_b)
-                        self.viewer.update()
+                mask_id = id_item.data(Qt.UserRole)
+                if mask_id in self.viewer.masks:
+                    self.viewer.masks[mask_id]['color'] = (new_r, new_g, new_b)
+                    self.viewer.update()
                 
                 # 更新颜色饼图
                 self.update_color_pie_chart()
@@ -1232,31 +1324,54 @@ class MainWindow(QMainWindow):
         if self.viewer.mode == "add":
             # 退出增加掩码模式
             self.viewer.set_add_mode()
-            self.btn_add.setStyleSheet(self.active_button_style)
-            self.btn_erase.setStyleSheet(self.active_button_style.replace("#1abc9c", "#3498db").replace("#16a085", "#2980b9"))
+            self.btn_add.setStyleSheet(self.button_style)  # 使用普通样式
         else:
             # 进入增加掩码模式
             self.viewer.set_add_mode()
-            self.btn_add.setStyleSheet(self.active_button_style)
-            self.btn_erase.setStyleSheet(self.active_button_style.replace("#1abc9c", "#3498db").replace("#16a085", "#2980b9"))
-
+            self.btn_add.setStyleSheet(self.active_button_style)  # 使用激活样式
+            # 确保擦除按钮显示为普通样式
+            self.btn_erase.setStyleSheet(self.button_style)  
+        
+        # 强制更新视图
+        self.viewer.update()
+            
     def toggle_erase_mode(self):
         """切换擦除掩码模式"""
         if self.viewer.mode == "erase":
             # 退出擦除掩码模式
             self.viewer.set_erase_mode()
-            self.btn_erase.setStyleSheet(self.active_button_style.replace("#1abc9c", "#3498db").replace("#16a085", "#2980b9"))
+            self.btn_erase.setStyleSheet(self.button_style)  # 使用普通样式
         else:
             # 进入擦除掩码模式
             self.viewer.set_erase_mode()
-            self.btn_erase.setStyleSheet(self.active_button_style)
-            self.btn_add.setStyleSheet(self.active_button_style.replace("#1abc9c", "#3498db").replace("#16a085", "#2980b9"))
+            self.btn_erase.setStyleSheet(self.active_button_style)  # 使用激活样式
+            # 确保增加按钮显示为普通样式
+            self.btn_add.setStyleSheet(self.button_style)
+            
+        # 强制更新视图
+        self.viewer.update()
 
     def check_magnifier_status(self):
         """定时检查放大镜状态并更新"""
         try:
             if not hasattr(self, 'viewer') or not self.viewer:
                 return
+            
+            # 如果放大镜功能被禁用，直接返回
+            if not self.magnifier_enabled:
+                if self.magnifier_window.isVisible():
+                    self.magnifier_window.hide()
+                return
+                
+            # 优化：引入static变量实现检查节流
+            if not hasattr(self, '_last_check_time'):
+                self._last_check_time = 0
+            
+            current_time = int(time.time() * 1000)  # 转为毫秒
+            if current_time - self._last_check_time < 80:  # 节流80ms
+                return
+                
+            self._last_check_time = current_time
                 
             # 检查放大镜是否应该显示
             if self.viewer.magnifier_active and self.viewer.mode in ("add", "erase"):
@@ -1283,13 +1398,44 @@ class MainWindow(QMainWindow):
     def update_magnifier_preview(self, pixmap):
         """更新放大镜预览"""
         try:
+            # 如果放大镜功能被禁用，直接返回
+            if not self.magnifier_enabled:
+                self.magnifier_window.clear()
+                self.magnifier_window.hide()
+                return
+                
             if pixmap is None or pixmap.isNull():
                 self.magnifier_window.clear()
                 self.magnifier_window.hide()
                 return
                 
-            self.magnifier_window.setPixmap(pixmap)
-            self.magnifier_window.move(20, 20)
+            # 保持适应窗口大小
+            scaled_pixmap = pixmap.scaled(
+                self.magnifier_window.width() - 10,  # 减小内边距
+                self.magnifier_window.height() - 10,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+                
+            self.magnifier_window.setPixmap(scaled_pixmap)
+            
+            # 智能调整位置，避免遮挡当前操作区域
+            cursor_pos = self.viewer.mapFromGlobal(QCursor.pos())
+            window_w, window_h = self.magnifier_window.width(), self.magnifier_window.height()
+            viewer_w, viewer_h = self.viewer.width(), self.viewer.height()
+            
+            # 默认位置在左上角
+            pos_x, pos_y = 20, 20
+            
+            # 如果鼠标在左半部分，把放大镜放到右边
+            if cursor_pos.x() < viewer_w / 2:
+                pos_x = viewer_w - window_w - 20
+            
+            # 如果鼠标在上半部分，把放大镜放到下边
+            if cursor_pos.y() < viewer_h / 2:
+                pos_y = viewer_h - window_h - 20
+                
+            self.magnifier_window.move(pos_x, pos_y)
             self.magnifier_window.show()
         except Exception as e:
             print(f"[错误] 更新放大镜预览时出错: {e}")
@@ -1298,6 +1444,42 @@ class MainWindow(QMainWindow):
                 self.magnifier_window.hide()
             except:
                 pass
+
+    def toggle_magnifier(self, state):
+        """切换放大镜显示状态"""
+        enabled = (state == Qt.Checked)
+        self.magnifier_enabled = enabled  # 保存状态到类变量
+        self.viewer.magnifier_active = enabled
+        
+        # 确保UI状态与选项状态一致
+        if not enabled:
+            # 强制隐藏放大镜窗口
+            self.magnifier_window.hide()
+            # 发送空的放大镜信号
+            self.viewer.magnifierUpdated.emit(QPixmap())
+        
+        # 更新所有相关状态
+        print(f"[设置] 放大镜显示状态: {'启用' if enabled else '禁用'}")
+
+    def resizeEvent(self, event):
+        """窗口大小变化时调整放大镜大小"""
+        super().resizeEvent(event)
+        self.update_magnifier_size()
+        
+    def update_magnifier_size(self):
+        """根据窗口大小动态调整放大镜尺寸"""
+        if hasattr(self, 'viewer') and self.viewer:
+            # 根据查看器窗口宽度的一定比例设置放大镜大小
+            viewer_width = self.viewer.width()
+            viewer_height = self.viewer.height()
+            
+            # 计算合适的放大镜大小（查看器宽度的20%，但不小于240px且不大于400px）
+            magnifier_size = int(min(max(viewer_width * 0.2, 240), 400))
+            
+            # 应用新尺寸
+            if hasattr(self, 'magnifier_window'):
+                self.magnifier_window.setFixedSize(magnifier_size, magnifier_size)
+                print(f"[更新] 放大镜尺寸调整为: {magnifier_size}x{magnifier_size}像素")
 
 # 添加可点击的颜色标签类
 class ClickableColorLabel(QLabel):
