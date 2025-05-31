@@ -16,6 +16,7 @@ import tqdm
 from contextlib import contextmanager
 from skimage import morphology
 from skimage import measure
+import json
 
 # 修改导入路径
 import sys
@@ -135,8 +136,186 @@ class SAMWrapper(torch.nn.Module):
         processed = self.post_process(masks)
         return processed
 
+class ColorSegmentationModelWrapper:
+    """Wrapper for the color segmentation model"""
+    def __init__(self):
+        self.model = None
+        self.img_size = 512
+        self.color_mapping = None
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.load_model()
+        
+    def load_model(self):
+        """Load the color segmentation model"""
+        try:
+            model_dir = Path(__file__).parent / "model"
+            model_path = model_dir / "model.pt"
+            color_mapping_path = model_dir / "color_mapping.json"
+            
+            if not model_path.exists():
+                print(f"Color segmentation model not found at {model_path}")
+                return
+                
+            if not color_mapping_path.exists():
+                print(f"Color mapping not found at {color_mapping_path}")
+                return
+                
+            # Load model with weights_only=False to ensure compatibility
+            try:
+                self.model = torch.jit.load(str(model_path), map_location=self.device)
+            except Exception as e:
+                print(f"Error loading model with default settings: {e}")
+                print("Trying to load with weights_only=False...")
+                self.model = torch.load(str(model_path), map_location=self.device, weights_only=False)
+            
+            self.model.eval()
+            
+            # Load color mapping
+            with open(color_mapping_path, 'r') as f:
+                self.color_mapping = json.load(f)
+            
+            print("Color segmentation model loaded successfully")
+            
+        except Exception as e:
+            print(f"Error loading color segmentation model: {e}")
+            self.model = None
+    
+    def segment_with_colors(self, image):
+        """Segment the image and return masks for each color class"""
+        if self.model is None:
+            print("Color segmentation model not loaded")
+            return None, None
+        
+        # Convert to RGB if needed
+        if len(image.shape) == 3 and image.shape[2] == 3:
+            # BGR to RGB
+            if isinstance(image, np.ndarray):
+                img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            else:
+                img_rgb = image
+        else:
+            print("Invalid image format")
+            return None, None
+        
+        # 增强预处理 - 使用双边滤波减少纹理但保留边缘
+        img_filtered = cv2.bilateralFilter(img_rgb, 9, 75, 75)
+        
+        # 增强对比度
+        lab = cv2.cvtColor(img_filtered, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        cl = clahe.apply(l)
+        enhanced_lab = cv2.merge((cl, a, b))
+        img_enhanced = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2RGB)
+        
+        # 计算边缘图用于后处理
+        img_gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(img_gray, 50, 150)
+        edges_dilated = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+        
+        # Resize image
+        img_resized = cv2.resize(img_enhanced, (self.img_size, self.img_size))
+        
+        # Normalize image - use double precision
+        img_float = img_resized.astype(np.float64) / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float64)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float64)
+        img_normalized = (img_float - mean) / std
+        
+        # Convert to tensor with double precision
+        img_tensor = torch.from_numpy(img_normalized.transpose(2, 0, 1)).unsqueeze(0).to(torch.float64).to(self.device)
+        
+        try:
+            # Make prediction
+            with torch.no_grad():
+                output = self.model(img_tensor)
+                # 确保应用softmax获取合适的概率分布
+                probs = torch.nn.functional.softmax(output, dim=1)
+                pred = torch.argmax(probs, dim=1)[0].cpu().numpy()
+            
+            # Create color mask
+            color_mask = np.zeros((self.img_size, self.img_size, 3), dtype=np.uint8)
+            
+            # Get class to color mapping
+            class_to_color = {int(k): v for k, v in self.color_mapping['class_to_color'].items()}
+            
+            # Create mask for each color class
+            masks = {}
+            
+            # 应用形态学操作进一步净化掩码
+            kernel = np.ones((5, 5), np.uint8)
+            
+            for class_id, color in class_to_color.items():
+                # Class ID in mask is class_id + 1 (0 is background)
+                binary_mask = (pred == class_id + 1)
+                
+                # Skip empty masks or masks with very few pixels
+                if np.sum(binary_mask) < 100:  # 增加最小像素阈值
+                    continue
+                
+                # 应用形态学操作清理掩码，移除噪点
+                cleaned_mask = cv2.morphologyEx(binary_mask.astype(np.uint8), cv2.MORPH_OPEN, kernel)
+                cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_CLOSE, kernel)
+                
+                # Skip if mask becomes empty after cleaning
+                if np.sum(cleaned_mask) < 100:
+                    continue
+                
+                # Add to color mask
+                color_mask[cleaned_mask > 0] = color
+                
+                # Store mask
+                masks[tuple(color)] = cleaned_mask > 0
+            
+            # Resize back to original size
+            original_h, original_w = image.shape[:2]
+            color_mask = cv2.resize(color_mask, (original_w, original_h), interpolation=cv2.INTER_NEAREST)
+            edges_resized = cv2.resize(edges_dilated, (original_w, original_h), interpolation=cv2.INTER_NEAREST)
+            
+            # 后处理 - 考虑边缘信息提高边界准确性
+            refined_masks = {}
+            for color, mask in masks.items():
+                resized_mask = cv2.resize((mask * 255).astype(np.uint8), 
+                                         (original_w, original_h), 
+                                         interpolation=cv2.INTER_NEAREST)
+                
+                # 使用边缘信息细化掩码边界
+                edge_mask = edges_resized > 0
+                
+                # 将边缘区域从掩码中移除，使得边界更加精确
+                refined_mask = (resized_mask > 0) & ~edge_mask
+                
+                # 再次应用形态学操作，使掩码更平滑
+                refined_mask = cv2.morphologyEx(refined_mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3,3), np.uint8))
+                refined_mask = cv2.morphologyEx(refined_mask, cv2.MORPH_CLOSE, np.ones((5,5), np.uint8))
+                
+                # 使用分水岭算法进一步细化区域
+                distance = cv2.distanceTransform(refined_mask, cv2.DIST_L2, 3)
+                ret, sure_fg = cv2.threshold(distance, 0.1*distance.max(), 255, 0)
+                sure_fg = sure_fg.astype(np.uint8)
+                
+                refined_masks[color] = sure_fg > 0
+            
+            # 重建颜色掩码
+            refined_color_mask = np.zeros((original_h, original_w, 3), dtype=np.uint8)
+            for color, mask in refined_masks.items():
+                refined_color_mask[mask] = color
+            
+            return refined_color_mask, refined_masks
+            
+        except Exception as e:
+            print(f"Error during segmentation: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None
+    
+    def segment_image(self, image):
+        """Segment the image and return the color mask"""
+        color_mask, _ = self.segment_with_colors(image)
+        return color_mask
+
 class AISegmentationWidget(QWidget):
-    segmentation_completed = pyqtSignal(object)  # 发送分割结果的信号
+    segmentation_completed = pyqtSignal(np.ndarray)  # 发送分割结果的信号
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -157,6 +336,9 @@ class AISegmentationWidget(QWidget):
         # 初始化viewer
         self.viewer = ImageViewer()
         self.viewer.setFixedSize(1024, 660)
+        
+        # 初始化颜色分割模型
+        self.color_model = None
         
         # 界面设置
         self.setupUI()
@@ -316,16 +498,14 @@ class AISegmentationWidget(QWidget):
                 QMessageBox.warning(self, "错误", f"添加参考图像失败：{str(e)}")
     
     def loadModel(self):
+        """Load the AI segmentation model"""
         try:
-            # 如果有共享的SAM模型，则使用它
-            if self.shared_sam_model is not None:
-                print("[AI分割] 使用共享的SAM模型")
-                # 创建SAMWrapper实例，使用共享的SAM模型
-                self.model = SAMWrapper(self.shared_sam_model.sam)
-                
-                # 更新UI状态
-                self.segment_btn.setEnabled(True)
-                self.model_status_label.setText("模型状态: 使用共享模型")
+            if self.shared_sam_model is None:
+                print("Initializing SAM model...")
+                self.shared_sam_model = SAMWrapper()
+            
+            if self.shared_sam_model.sam_model is not None:
+                self.model_status_label.setText("模型状态: 已加载")
                 self.model_status_label.setStyleSheet("""
                     QLabel {
                         padding: 5px;
@@ -334,178 +514,50 @@ class AISegmentationWidget(QWidget):
                         color: #155724;
                     }
                 """)
-                
-                return
-                
-            # 以下是原有的模型加载逻辑
-            # 获取当前文件所在目录
-            current_dir = Path(__file__).resolve().parent
-            project_root = current_dir.parent.parent.parent
-            
-            # 模型路径 - 使用src/color_annotator/checkpoints目录
-            checkpoints_dir = project_root / "src" / "color_annotator" / "checkpoints"
-            checkpoints_dir.mkdir(exist_ok=True)
-            
-            # 检查是否需要从旧目录迁移模型文件
-            old_checkpoints_dir = project_root / "checkpoints"
-            if old_checkpoints_dir.exists():
-                try:
-                    # 迁移训练好的模型
-                    old_model_path = old_checkpoints_dir / "best_sam_model.pth"
-                    if old_model_path.exists():
-                        import shutil
-                        new_model_path = checkpoints_dir / "best_sam_model.pth"
-                        if not new_model_path.exists():  # 只有在目标不存在时才复制
-                            shutil.copy2(str(old_model_path), str(new_model_path))
-                            QMessageBox.information(
-                                self,
-                                "迁移完成",
-                                f"已将训练好的模型从\n{old_model_path}\n迁移到\n{new_model_path}"
-                            )
-                except Exception as e:
-                    QMessageBox.warning(
-                        self,
-                        "迁移警告",
-                        f"迁移模型文件时出错：{str(e)}\n请手动将模型文件移动到{checkpoints_dir}"
-                    )
-            
-            sam_checkpoint = checkpoints_dir / "sam_vit_b.pth"
-            model_checkpoint = checkpoints_dir / "best_sam_model.pth"
-            
-            # 检查SAM基础模型
-            if not sam_checkpoint.exists():
-                reply = QMessageBox.question(
-                    self,
-                    "下载模型",
-                    "SAM基础模型不存在，是否要下载？\n(大约需要下载600MB)",
-                    QMessageBox.Yes | QMessageBox.No
-                )
-                if reply == QMessageBox.Yes:
-                    try:
-                        import requests
-                        import tqdm
-                        
-                        url = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
-                        response = requests.get(url, stream=True)
-                        total_size = int(response.headers.get('content-length', 0))
-                        
-                        progress = QProgressDialog("正在下载SAM模型...", "取消", 0, total_size, self)
-                        progress.setWindowModality(Qt.WindowModal)
-                        
-                        with open(sam_checkpoint, 'wb') as f:
-                            for data in response.iter_content(chunk_size=1024):
-                                if progress.wasCanceled():
-                                    f.close()
-                                    sam_checkpoint.unlink()
-                                    return
-                                f.write(data)
-                                progress.setValue(f.tell())
-                        
-                        progress.close()
-                    except Exception as e:
-                        QMessageBox.critical(self, "下载失败", f"下载SAM模型失败：{str(e)}")
-                        return
-                else:
-                    return
-            
-            # 检查训练好的模型
-            self.using_base_model = False
-            if not model_checkpoint.exists():
-                reply = QMessageBox.question(
-                    self,
-                    "模型缺失",
-                    "训练好的模型文件不存在，是否继续使用基础SAM模型？\n" +
-                    "注意：基础模型可能无法准确分割服饰，建议使用训练好的模型。",
-                    QMessageBox.Yes | QMessageBox.No
-                )
-                if reply == QMessageBox.No:
-                    return
-                self.using_base_model = True
-            
-            # 加载SAM模型
-            sam_model = sam_model_registry["vit_b"](checkpoint=str(sam_checkpoint))
-            self.model = SAMWrapper(sam_model)
-            
-            # 如果存在训练好的模型，则加载
-            if model_checkpoint.exists():
-                try:
-                    # 设置安全加载选项
-                    @contextmanager
-                    def allow_numpy_scalar():
-                        import numpy as np
-                        _orig_scalar = np.core.multiarray.scalar
-                        try:
-                            yield
-                        finally:
-                            np.core.multiarray.scalar = _orig_scalar
-                    
-                    with allow_numpy_scalar():
-                        checkpoint = torch.load(
-                            model_checkpoint,
-                            map_location=self.device,
-                            weights_only=False  # 使用False以避免兼容性问题
-                        )
-                    
-                    # 如果加载的是state_dict格式
-                    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                        self.model.load_state_dict(checkpoint['model_state_dict'])
-                    else:
-                        # 如果是直接的state_dict
-                        self.model.load_state_dict(checkpoint)
-                    
-                    # 更新模型状态UI
-                    self.model_status_label.setText("模型状态: 已加载训练模型")
-                    self.model_status_label.setStyleSheet("""
-                        QLabel {
-                            padding: 5px;
-                            border-radius: 3px;
-                            background-color: #d4edda;
-                            color: #155724;
-                        }
-                    """)
-                except Exception as e:
-                    reply = QMessageBox.question(
-                        self,
-                        "加载警告",
-                        f"加载训练好的模型时出错：{str(e)}\n是否继续使用基础SAM模型？",
-                        QMessageBox.Yes | QMessageBox.No
-                    )
-                    if reply == QMessageBox.No:
-                        return
-                    self.using_base_model = True
-            
-            self.model.to(self.device)
-            self.model.eval()
-            
-            # 更新UI状态
-            self.segment_btn.setEnabled(True)
-            if self.using_base_model:
-                self.segment_btn.setText("开始分割(基础模型)")
-                self.segment_btn.setStyleSheet("""
-                    QPushButton {
-                        background-color: #ffc107;
-                        color: black;
-                    }
-                    QPushButton:hover {
-                        background-color: #ffb300;
-                    }
-                """)
-                self.model_status_label.setText("模型状态: 使用基础模型")
+                self.segment_btn.setEnabled(True)
+            else:
+                print("Failed to load SAM model")
+                self.model_status_label.setText("模型状态: 加载失败")
                 self.model_status_label.setStyleSheet("""
                     QLabel {
                         padding: 5px;
                         border-radius: 3px;
-                        background-color: #fff3cd;
-                        color: #856404;
+                        background-color: #f8d7da;
+                        color: #721c24;
                     }
                 """)
-            else:
-                self.segment_btn.setText("开始分割")
-                self.segment_btn.setStyleSheet("")
-            
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"加载模型时出错：{str(e)}")
-            self.segment_btn.setEnabled(False)
+            print(f"Error loading SAM model: {e}")
+            self.model_status_label.setText(f"模型状态: 错误 - {str(e)}")
+            self.model_status_label.setStyleSheet("""
+                QLabel {
+                    padding: 5px;
+                    border-radius: 3px;
+                    background-color: #f8d7da;
+                    color: #721c24;
+                }
+            """)
+        
+        # Load color segmentation model
+        try:
+            print("Loading color segmentation model...")
+            self.color_model = ColorSegmentationModelWrapper()
+            if self.color_model.model is not None:
+                self.model_status_label.setText("模型状态: 已加载")
+                self.model_status_label.setStyleSheet("""
+                    QLabel {
+                        padding: 5px;
+                        border-radius: 3px;
+                        background-color: #d4edda;
+                        color: #155724;
+                    }
+                """)
+                self.segment_btn.setEnabled(True)
+                print("Color segmentation model loaded successfully")
+            else:
+                print("Failed to load color segmentation model")
+        except Exception as e:
+            print(f"Error loading color segmentation model: {e}")
     
     def setImage(self, image):
         """设置要分割的图像"""
@@ -528,319 +580,130 @@ class AISegmentationWidget(QWidget):
         self.viewer = viewer
     
     def performSegmentation(self):
-        """执行分割"""
+        """Execute AI segmentation on the current image"""
         if self.current_image is None:
-            QMessageBox.warning(self, "警告", "请先加载图像！")
+            QMessageBox.warning(self, "No Image", "Please load an image first.")
             return
-        
-        if self.model is None:
-            QMessageBox.warning(self, "警告", "请先加载模型！")
-            return
-        
-        if self.using_base_model:
-            reply = QMessageBox.question(
-                self,
-                "确认",
-                "当前使用的是基础SAM模型，可能无法准确分割服饰。\n是否继续？",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if reply == QMessageBox.No:
-                return
         
         try:
-            print("[分割] 开始准备图像...")
-            # 准备图像
-            image = self.current_image.copy()
-            if len(image.shape) == 2:
-                image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-            elif image.shape[2] == 4:
-                image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
+            # Create progress dialog
+            progress = QProgressDialog("Performing segmentation...", "Cancel", 0, 100, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setWindowTitle("AI Segmentation")
+            progress.show()
+            progress.setValue(10)
             
-            print(f"[分割] 图像尺寸: {image.shape}")
-            
-            # 图像预处理增强
-            # 1. 应用双边滤波减少纹理影响，同时保留边缘
-            image = cv2.bilateralFilter(image, 9, 75, 75)
-            
-            # 2. 增强对比度
-            lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-            l, a, b = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-            cl = clahe.apply(l)
-            enhanced = cv2.merge((cl,a,b))
-            image = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
-            
-            # 确保图像尺寸合适
-            orig_h, orig_w = image.shape[:2]
-            if max(orig_h, orig_w) > 1024:
-                scale = 1024 / max(orig_h, orig_w)
-                new_h, new_w = int(orig_h * scale), int(orig_w * scale)
-                image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
-                print(f"[分割] 调整图像尺寸至: {new_h}x{new_w}")
-            
-            print("[分割] 转换为PyTorch张量...")
-            # 转换为PyTorch张量
-            image = torch.from_numpy(image).float().permute(2, 0, 1).unsqueeze(0)
-            image = image / 255.0
-            
-            # 标准化
-            mean = torch.tensor([0.485, 0.456, 0.406]).view(-1, 1, 1)
-            std = torch.tensor([0.229, 0.224, 0.225]).view(-1, 1, 1)
-            image = (image - mean) / std
-            
-            # 移动到设备
-            image = image.to(self.device)
-            print(f"[分割] 图像已加载到设备: {self.device}")
-            
-            # 显示进度条
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setValue(0)
-            
-            print("[分割] 执行模型推理...")
-            # 执行分割
-            with torch.no_grad():
-                try:
-                    outputs = self.model(image)
-                    print(f"[分割] 模型输出尺寸: {outputs.shape}")
-                    pred_mask = torch.sigmoid(outputs) > 0.35  # 降低阈值以获取更多细节
-                    pred_mask = pred_mask.cpu().numpy()[0, 0]
-                    print(f"[分割] 掩码尺寸: {pred_mask.shape}")
-                except Exception as e:
-                    print(f"[错误] 模型推理失败: {str(e)}")
-                    raise
-            
-            print("[分割] 开始后处理...")
-            # 后处理
-            try:
-                # 1. 标记连通区域
-                print("[分割] 标记连通区域...")
-                labeled_mask = measure.label(pred_mask)
-                num_regions = np.max(labeled_mask)
-                print(f"[分割] 找到 {num_regions} 个连通区域")
+            # Try to use the color model first, fall back to SAM if needed
+            if self.color_model and self.color_model.model:
+                # Use color segmentation model
+                progress.setValue(30)
                 
-                regions = measure.regionprops(labeled_mask)
-                print(f"[分割] 计算区域属性完成，共 {len(regions)} 个区域")
+                # Segment image with color model
+                color_mask, resized_masks = self.color_model.segment_with_colors(self.current_image)
                 
-                if regions:
-                    # 计算每个区域的特征
-                    region_features = []
-                    image_area = pred_mask.shape[0] * pred_mask.shape[1]
-                    image_center = np.array([pred_mask.shape[0] / 2, pred_mask.shape[1] / 2])
+                if color_mask is not None:
+                    progress.setValue(50)
                     
-                    for region in regions:
-                        # 跳过太小的区域
-                        if region.area < image_area * 0.01:  # 增加最小面积阈值
-                            continue
-                            
-                        # 基本特征
-                        area_ratio = region.area / image_area
-                        
-                        # 正确计算宽高比
-                        bbox = region.bbox  # (min_row, min_col, max_row, max_col)
-                        height = bbox[2] - bbox[0]
-                        width = bbox[3] - bbox[1]
-                        aspect_ratio = width / height if height > 0 else 0
-                        
-                        solidity = region.solidity  # 区域密实度
-                        extent = region.extent     # 区域范围比
-                        
-                        # 位置特征
-                        centroid = np.array(region.centroid)
-                        dist_to_center = np.linalg.norm(centroid - image_center)
-                        max_possible_dist = np.sqrt(image_center[0]**2 + image_center[1]**2)
-                        center_score = 1 - (dist_to_center / max_possible_dist)
-                        
-                        # 形状特征
-                        perimeter = region.perimeter
-                        compactness = 4 * np.pi * region.area / (perimeter * perimeter + 1e-6)
-                        
-                        # 边缘特征
-                        edge_pixels = region.perimeter_crofton
-                        edge_density = edge_pixels / np.sqrt(region.area)
-                        
-                        # 计算总分
-                        shape_score = (
-                            (0.3 < aspect_ratio < 3.0) * 2.0 +  # 合理的宽高比
-                            (solidity > 0.7) * 1.0 +            # 较高的密实度
-                            (extent > 0.5) * 1.0 +              # 较大的范围比
-                            (compactness > 0.3) * 1.0 +         # 适当的紧凑度
-                            (edge_density < 0.5) * 1.0          # 边缘平滑度
-                        )
-                        
-                        total_score = (
-                            shape_score * 0.4 +                 # 形状特征权重
-                            center_score * 0.3 +                # 中心位置权重
-                            (0.1 < area_ratio < 0.8) * 0.3     # 合理的面积比例
-                        )
-                        
-                        # 添加调试信息
-                        print(f"[调试] 区域 {len(region_features)}: " + 
-                              f"面积={region.area}, " +
-                              f"宽高比={aspect_ratio:.2f}, " +
-                              f"密实度={solidity:.2f}, " +
-                              f"范围比={extent:.2f}, " +
-                              f"中心得分={center_score:.2f}, " +
-                              f"总分={total_score:.2f}")
-                        
-                        region_features.append({
-                            'region': region,
-                            'score': total_score,
-                            'area': region.area,
-                            'aspect_ratio': aspect_ratio,
-                            'solidity': solidity,
-                            'extent': extent,
-                            'center_score': center_score,
-                            'edge_density': edge_density
-                        })
+                    # Create visualization
+                    overlay = self.current_image.copy()
+                    overlay[color_mask > 0] = color_mask[color_mask > 0]
                     
-                    if not region_features:
-                        print("[警告] 没有找到有效的区域")
-                        return None
+                    # Convert to QPixmap
+                    h, w = overlay.shape[:2]
+                    qimg = QImage(overlay.data, w, h, w * 3, QImage.Format_RGB888)
+                    pixmap = QPixmap.fromImage(qimg)
                     
-                    # 按总分排序，选择得分最高的区域
-                    sorted_regions = sorted(region_features, key=lambda x: x['score'], reverse=True)
-                    best_region = sorted_regions[0]
+                    # Display result
+                    self.show_segmentation_preview(pixmap)
                     
-                    print(f"[分割] 选择最佳区域 - " +
-                          f"面积: {best_region['area']}, " +
-                          f"占比: {best_region['area'] / image_area:.1%}, " +
-                          f"宽高比: {best_region['aspect_ratio']:.2f}, " +
-                          f"总分: {best_region['score']:.2f}")
+                    # Emit segmentation completed signal with the color mask
+                    self.segmentation_completed.emit(color_mask)
                     
-                    pred_mask = labeled_mask == best_region['region'].label
-                    
-                    # 验证选择的区域
-                    if np.sum(pred_mask) < image_area * 0.05:  # 增加最小面积阈值
-                        print("[警告] 选择的区域太小，可能无效")
-                        return None
-                
-                # 2. 平滑边界
-                print("[分割] 执行形态学操作...")
-                # 先进行闭运算填充小孔
-                kernel_close = np.ones((7,7), np.uint8)  # 增大核大小
-                pred_mask = cv2.morphologyEx(pred_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel_close)
-                
-                # 再进行开运算去除噪点
-                kernel_open = np.ones((5,5), np.uint8)  # 增大核大小
-                pred_mask = cv2.morphologyEx(pred_mask, cv2.MORPH_OPEN, kernel_open)
-                
-                # 最后进行轻微的膨胀，确保边界完整
-                kernel_dilate = np.ones((3,3), np.uint8)
-                pred_mask = cv2.dilate(pred_mask, kernel_dilate, iterations=1)
-                
-                print("[分割] 形态学操作完成")
+                    progress.setValue(100)
+                    progress.close()
+                    return
+                else:
+                    # Fall back to SAM model if no colors found
+                    print("No color segments found, falling back to SAM")
             
-            except Exception as e:
-                print(f"[警告] 后处理出错，使用原始掩码: {str(e)}")
-                # 如果后处理失败，使用原始掩码继续
-                pass
-            
-            # 3. 调整回原始尺寸
-            print(f"[分割] 调整掩码尺寸至原始大小: {self.current_image.shape[1]}x{self.current_image.shape[0]}")
-            pred_mask = cv2.resize(
-                pred_mask.astype(np.uint8),
-                (self.current_image.shape[1], self.current_image.shape[0]),
-                interpolation=cv2.INTER_NEAREST
-            )
-            
-            # 隐藏进度条
-            self.progress_bar.setVisible(False)
-            
-            print("[分割] 检查结果...")
-            # 安全检查
-            if not isinstance(pred_mask, np.ndarray):
-                raise ValueError("掩码不是有效的numpy数组")
-            
-            if pred_mask.shape != (self.current_image.shape[0], self.current_image.shape[1]):
-                raise ValueError(f"掩码尺寸不匹配: 期望 {self.current_image.shape[:2]}, 实际 {pred_mask.shape}")
-            
-            # 确保掩码是布尔类型
-            pred_mask = pred_mask.astype(bool)
-            
-            print(f"[分割] 发送结果... 掩码尺寸: {pred_mask.shape}, 类型: {pred_mask.dtype}")
-            
-            # 创建可视化图像
-            vis_img = self.current_image.copy()
-            vis_img[pred_mask] = [0, 255, 0]  # 将分割区域显示为绿色
-            
-            # 显示可视化结果
-            h, w = vis_img.shape[:2]
-            bytes_per_line = 3 * w
-            q_img = QImage(vis_img.data, w, h, bytes_per_line, QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(q_img)
-            scaled_pixmap = pixmap.scaled(300, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.preview_label.setPixmap(scaled_pixmap)
-            
-            # 发送结果
-            self.segmentation_completed.emit(pred_mask)
-            print("[分割] 完成")
-            
-            # 分析掩码区域的主要颜色
-            print("[分析] 开始分析掩码区域的颜色...")
-            img = self.current_image.copy()
-            
-            # 应用双边滤波减少纹理影响，同时保留边缘
-            img = cv2.bilateralFilter(img, 9, 75, 75)
-            
-            masked_img = img.copy()
-            masked_img[~pred_mask] = 0  # 将非掩码区域设为黑色
-            
-            # 使用颜色分析器分析主色，减少颜色数量，只提取最主要的颜色
-            color_infos = self.color_analyzer.analyze_image_colors(masked_img, pred_mask, k=5)
-            if not color_infos:
-                print("[警告] 无法分析颜色")
+            # Use SAM model as fallback
+            if self.shared_sam_model is None or self.shared_sam_model.sam_model is None:
+                progress.close()
+                QMessageBox.warning(self, "Model Not Loaded", "AI model not loaded properly.")
                 return
             
-            # 只保留占比超过5%的主要颜色
-            color_infos = [c for c in color_infos if c.percentage > 0.05]
+            # Get current points
+            fg_points = self.get_points_from_table(self.fg_table)
+            bg_points = self.get_points_from_table(self.bg_table)
             
-            print(f"[分析] 检测到 {len(color_infos)} 种主要颜色:")
-            for i, color_info in enumerate(color_infos):
-                print(f"  {i+1}. RGB={color_info.rgb}, 占比={color_info.percentage:.1%}")
+            if len(fg_points) == 0 and len(bg_points) == 0:
+                progress.close()
+                QMessageBox.warning(self, "No Points", "Please add at least one foreground or background point.")
+                return
+            
+            progress.setValue(40)
+            
+            # Process points format for SAM
+            input_point = []
+            input_label = []
+            
+            for point in fg_points:
+                input_point.append(point)
+                input_label.append(1)  # 1 for foreground
                 
-                try:
-                    # 为每种主要颜色创建独立的掩码
-                    color_mask = self.create_color_mask(masked_img, pred_mask, color_info.rgb)
-                    
-                    # 应用额外的形态学操作来合并相似区域
-                    kernel = np.ones((7,7), np.uint8)
-                    color_mask = cv2.morphologyEx(color_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
-                    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_OPEN, kernel)
-                    color_mask = color_mask.astype(bool)
-                    
-                    # 创建新的标注
-                    mask_id = len(self.viewer.masks) if self.viewer.masks else 0
-                    
-                    # 添加到标注列表
-                    if self.viewer.masks is None:
-                        self.viewer.masks = {}
-                    
-                    print(f"[处理] 添加颜色 {color_info.rgb} 的掩码 ID: {mask_id}")
-                    self.viewer.masks[mask_id] = {
-                        'mask': color_mask,
-                        'color': color_info.rgb,
-                        'visible': True,
-                        'editable': False
-                    }
-                    
-                    # 添加到表格
-                    self.add_annotation_to_table(color_info, mask_id)
-                    
-                except Exception as e:
-                    print(f"[警告] 处理颜色 {color_info.rgb} 时出错: {str(e)}")
-                    continue
+            for point in bg_points:
+                input_point.append(point)
+                input_label.append(0)  # 0 for background
             
-            # 更新显示
-            print("[更新] 刷新预览...")
-            self.update_annotation_preview()
-            self.update_color_pie_chart()
-            print("[完成] 分割结果处理完成")
+            # Convert to numpy arrays
+            input_point = np.array(input_point)
+            input_label = np.array(input_label)
             
+            progress.setValue(60)
+            
+            # Run inference
+            mask = self.shared_sam_model.forward(
+                self.current_image,
+                input_point,
+                input_label
+            )
+            
+            progress.setValue(80)
+            
+            if mask is None:
+                progress.close()
+                QMessageBox.warning(self, "Segmentation Failed", "Failed to generate mask.")
+                return
+            
+            # Apply mask to image
+            masked_img = self.current_image.copy()
+            colored_mask = np.zeros_like(masked_img)
+            colored_mask[mask > 0] = [0, 255, 0]  # Green mask
+            
+            # Create overlay
+            alpha = 0.5
+            cv2.addWeighted(colored_mask, alpha, masked_img, 1 - alpha, 0, masked_img)
+            
+            # Convert to QPixmap
+            h, w, c = masked_img.shape
+            qimg = QImage(masked_img.data, w, h, w * c, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimg)
+            
+            # Display result
+            self.show_segmentation_preview(pixmap)
+            
+            # Emit segmentation completed signal with the combined mask
+            self.segmentation_completed.emit(mask)
+            
+            progress.setValue(100)
+            progress.close()
+        
         except Exception as e:
             import traceback
-            print(f"[错误] 分割过程中出错：\n{traceback.format_exc()}")
-            self.progress_bar.setVisible(False)
-            QMessageBox.critical(self, "错误", f"分割过程中出错：{str(e)}")
+            progress.close()
+            error_msg = f"Segmentation error: {str(e)}\n{traceback.format_exc()}"
+            print(error_msg)
+            QMessageBox.critical(self, "Segmentation Error", f"An error occurred during segmentation:\n{str(e)}")
 
     def create_color_mask(self, img, base_mask, target_color, tolerance=45):
         """创建特定颜色的掩码"""
@@ -1162,4 +1025,55 @@ class AISegmentationWidget(QWidget):
             else:
                 scaled = pixmap.scaledToHeight(max_h, Qt.SmoothTransformation)
 
-            self.segmentation_preview_label.setPixmap(scaled) 
+            self.segmentation_preview_label.setPixmap(scaled)
+
+    def segment_image_with_colors(self):
+        """Segment the image with color model and show preview"""
+        if self.current_image is None:
+            QMessageBox.warning(self, "警告", "请先加载图像")
+            return
+            
+        try:
+            # Show progress dialog
+            progress = QProgressDialog("正在分割图像...", "取消", 0, 100, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.show()
+            progress.setValue(10)
+            
+            # Segment image with color model
+            color_mask, resized_masks = self.color_model.segment_with_colors(self.current_image)
+            
+            if color_mask is not None and resized_masks:
+                progress.setValue(50)
+                
+                # Apply overlay effect
+                alpha = 0.7
+                overlay = cv2.addWeighted(self.current_image, 1 - alpha, color_mask, alpha, 0)
+                
+                # Convert to QPixmap
+                h, w = overlay.shape[:2]
+                qimg = QImage(overlay.data, w, h, w * 3, QImage.Format_RGB888)
+                pixmap = QPixmap.fromImage(qimg)
+                
+                # Display result
+                self.show_segmentation_preview(pixmap)
+                
+                # Convert color mask to binary mask for compatibility
+                binary_mask = np.zeros(self.current_image.shape[:2], dtype=np.uint8)
+                # 检查是否有颜色像素，如果有则标记为1
+                binary_mask[np.where((color_mask[:,:,0] > 0) | (color_mask[:,:,1] > 0) | (color_mask[:,:,2] > 0))] = 1
+                
+                print(f"生成的binary_mask的形状: {binary_mask.shape}, 类型: {binary_mask.dtype}")
+                
+                # Emit segmentation completed signal with binary mask
+                self.segmentation_completed.emit(binary_mask)
+                
+                progress.setValue(100)
+            else:
+                progress.close()
+                QMessageBox.warning(self, "错误", "颜色分割失败")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"分割过程出错: {str(e)}")
+            import traceback
+            traceback.print_exc() 

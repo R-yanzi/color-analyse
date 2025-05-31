@@ -784,8 +784,25 @@ class MainWindow(QMainWindow):
         # 更新表格中的占比数据
         self.update_percentage_in_table(mask_pixels, total_mask_pixels)
             
-        # 绘制饼图
-        plt.rcParams['font.sans-serif'] = ['SimHei']
+        # 绘制饼图 - 优化字体设置
+        # 尝试多种中文字体，适应不同操作系统
+        chinese_fonts = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', 
+                         'PingFang SC', 'Hiragino Sans GB', 'Noto Sans CJK SC', 
+                         'Source Han Sans CN', 'Arial Unicode MS', 'sans-serif']
+        
+        # 使用matplotlib的font_manager检测可用字体
+        import matplotlib.font_manager as fm
+        import platform
+        
+        # 根据操作系统类型设置默认字体
+        system = platform.system()
+        if system == 'Windows':
+            plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei'] + plt.rcParams['font.sans-serif']
+        elif system == 'Darwin':  # macOS
+            plt.rcParams['font.sans-serif'] = ['PingFang SC', 'Hiragino Sans GB'] + plt.rcParams['font.sans-serif']
+        else:  # Linux
+            plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'Noto Sans CJK SC'] + plt.rcParams['font.sans-serif']
+            
         plt.rcParams['axes.unicode_minus'] = False
 
         plt.clf()
@@ -804,12 +821,12 @@ class MainWindow(QMainWindow):
             startangle=90
         )
 
-        # 添加图例
+        # 添加图例 - 使用英文避免中文显示问题
         legend_labels = [f'{data["percentage"]:.1%}' for data in colors_data]
         legend = ax.legend(
             wedges,
             legend_labels,
-            title="颜色占比",
+            title="Color Ratio",  # 使用英文"颜色占比"
             loc="center left",
             bbox_to_anchor=(1, 0, 0.5, 1),
             fontsize=14,
@@ -823,22 +840,28 @@ class MainWindow(QMainWindow):
         ax.axis('equal')
 
         # 保存图片
-        buf = BytesIO()
-        plt.savefig(buf, format='png', bbox_inches='tight', dpi=100, pad_inches=0.3)
-        buf.seek(0)
-        plt.close(fig)
+        try:
+            buf = BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', dpi=100, pad_inches=0.3)
+            buf.seek(0)
+            plt.close(fig)
 
-        # 显示图片
-        img = QImage.fromData(buf.read())
-        pixmap = QPixmap.fromImage(img)
-        scaled_pixmap = pixmap.scaled(
-            self.color_pie_chart_label.size(),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
-        )
-        self.color_pie_chart_label.setPixmap(scaled_pixmap)
-        self.color_pie_chart_label.setAlignment(Qt.AlignCenter)
-    
+            # 显示图片
+            img = QImage.fromData(buf.read())
+            pixmap = QPixmap.fromImage(img)
+            scaled_pixmap = pixmap.scaled(
+                self.color_pie_chart_label.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            self.color_pie_chart_label.setPixmap(scaled_pixmap)
+            self.color_pie_chart_label.setAlignment(Qt.AlignCenter)
+        except Exception as e:
+            print(f"[错误] 生成饼图时出错: {e}")
+            import traceback
+            print(traceback.format_exc())
+            self.color_pie_chart_label.setText("饼图生成失败")
+
     def update_percentage_in_table(self, mask_pixels, total_mask_pixels):
         """更新表格中的占比数据"""
         for row in range(self.annotation_table.rowCount()):
@@ -1237,47 +1260,199 @@ class MainWindow(QMainWindow):
             if self.viewer.cv_img is None:
                 print("[警告] 没有加载图像，忽略分割结果")
                 return
-                
+            
             if not isinstance(mask, np.ndarray):
                 print(f"[错误] 掩码类型无效: {type(mask)}")
                 return
+            
+            # 处理3D掩码（彩色掩码）
+            if len(mask.shape) == 3 and mask.shape[2] == 3:
+                print("[处理] 检测到彩色掩码，分离不同颜色区域")
                 
-            if mask.shape != (self.viewer.cv_img.shape[0], self.viewer.cv_img.shape[1]):
-                print(f"[错误] 掩码尺寸不匹配: 期望 {self.viewer.cv_img.shape[:2]}, 实际 {mask.shape}")
+                # 增强彩色掩码清晰度
+                img = self.viewer.cv_img.copy()
+                
+                # 创建颜色分类掩码字典
+                color_masks = {}
+                
+                # 提取唯一颜色
+                mask_flattened = mask.reshape(-1, 3)
+                unique_colors = np.unique(mask_flattened, axis=0)
+                
+                # 移除黑色背景 [0,0,0]
+                unique_colors = unique_colors[~np.all(unique_colors == [0, 0, 0], axis=1)]
+                
+                print(f"[分析] 检测到 {len(unique_colors)} 种不同颜色")
+                
+                # 使用颜色相似度聚类算法对颜色进行合并
+                if len(unique_colors) > 0:
+                    # 转为浮点数进行K-means聚类
+                    colors_float = unique_colors.astype(np.float32)
+                    
+                    # 根据颜色数量确定聚类数
+                    optimal_k = min(8, len(unique_colors))  # 最多保留8种颜色
+                    
+                    if optimal_k > 1:  # 只有多于一种颜色时才进行聚类
+                        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.1)
+                        _, labels, centers = cv2.kmeans(
+                            colors_float, optimal_k, None, criteria, 
+                            10, cv2.KMEANS_PP_CENTERS
+                        )
+                        
+                        # 创建映射字典，将原始颜色映射到聚类中心
+                        color_map = {}
+                        for i, color in enumerate(unique_colors):
+                            center_idx = labels[i][0]  # 修复：获取标签的第一个元素
+                            center_color = tuple(map(int, centers[center_idx]))
+                            color_map[tuple(color)] = center_color
+                            
+                        # 重新着色掩码，使用聚类中心颜色
+                        refined_mask = np.zeros_like(mask)
+                        for y in range(mask.shape[0]):
+                            for x in range(mask.shape[1]):
+                                pixel = tuple(mask[y, x])
+                                if pixel != (0, 0, 0):  # 跳过黑色背景
+                                    if pixel in color_map:
+                                        refined_mask[y, x] = color_map[pixel]
+                        
+                        # 用合并后的颜色替换原始掩码
+                        mask = refined_mask
+                        
+                        # 重新提取唯一颜色
+                        mask_flattened = mask.reshape(-1, 3)
+                        unique_colors = np.unique(mask_flattened, axis=0)
+                        unique_colors = unique_colors[~np.all(unique_colors == [0, 0, 0], axis=1)]
+                        
+                        print(f"[合并] 合并相似颜色后剩余 {len(unique_colors)} 种颜色")
+                
+                # 为每种颜色创建二值掩码
+                for color in unique_colors:
+                    # 创建该颜色的掩码
+                    color_mask = np.all(mask == color.reshape(1, 1, 3), axis=2)
+                    
+                    # 应用形态学操作清理掩码
+                    kernel = np.ones((5, 5), np.uint8)
+                    color_mask = cv2.morphologyEx(color_mask.astype(np.uint8), cv2.MORPH_OPEN, kernel)
+                    color_mask = cv2.morphologyEx(color_mask, cv2.MORPH_CLOSE, kernel)
+                    
+                    # 使用连通区域分析移除小区域
+                    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(color_mask, connectivity=8)
+                    min_area = 500  # 最小连通区域面积阈值
+                    refined_mask = np.zeros_like(color_mask)
+                    
+                    for i in range(1, num_labels):  # 从1开始，跳过背景(0)
+                        if stats[i, cv2.CC_STAT_AREA] >= min_area:
+                            refined_mask[labels == i] = 1
+                    
+                    # 检查掩码大小，忽略太小的区域
+                    if np.sum(refined_mask) < 500:
+                        continue
+                    
+                    # 保存掩码
+                    color_tuple = tuple(map(int, color))
+                    color_masks[color_tuple] = refined_mask > 0
+                
+                # 后处理 - 确保掩码之间不重叠
+                sorted_colors = sorted(color_masks.keys(), 
+                                       key=lambda c: np.sum(color_masks[c]), 
+                                       reverse=True)  # 按区域大小排序
+                
+                # 处理每个颜色掩码 - 使用原始图像颜色分析来优化颜色选择
+                for color in sorted_colors:
+                    color_mask = color_masks[color]
+                    
+                    # 分析掩码区域的实际主要颜色
+                    masked_img = img.copy()
+                    masked_img[~color_mask] = 0  # 将非掩码区域设为黑色
+                    
+                    # 使用颜色分析器分析该区域的主要颜色
+                    color_infos = self.color_analyzer.analyze_image_colors(masked_img, color_mask, k=1)
+                    
+                    if color_infos:
+                        # 获取该区域的主要颜色
+                        color_info = color_infos[0]
+                        
+                        # 创建新的标注
+                        mask_id = len(self.viewer.masks) if self.viewer.masks else 0
+                        
+                        # 添加到标注列表
+                        if self.viewer.masks is None:
+                            self.viewer.masks = {}
+                        
+                        print(f"[处理] 添加颜色 {color_info.rgb} 的掩码 ID: {mask_id}")
+                        self.viewer.masks[mask_id] = {
+                            'mask': color_mask,
+                            'color': color_info.rgb,
+                            'visible': True,
+                            'editable': False
+                        }
+                        
+                        # 添加到表格
+                        self.add_annotation_to_table(color_info, mask_id)
+            
+            # 处理二进制掩码（单一区域）
+            elif len(mask.shape) == 2 or (len(mask.shape) == 3 and mask.shape[2] == 1):
+                print("[分析] 处理二进制掩码")
+                
+                # 确保掩码是二维的
+                if len(mask.shape) == 3:
+                    mask = mask.squeeze()
+                
+                # 转换为布尔类型
+                mask = mask.astype(bool)
+                
+                # 形态学操作清理掩码
+                kernel = np.ones((5, 5), np.uint8)
+                cleaned_mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, kernel)
+                cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_CLOSE, kernel)
+                mask = cleaned_mask > 0
+                
+                # 使用连通区域分析，提取多个独立区域
+                num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+                
+                print(f"[分析] 检测到 {num_labels-1} 个独立区域")
+                
+                # 分别处理每个区域
+                for i in range(1, num_labels):  # 从1开始，跳过背景(0)
+                    # 检查区域大小
+                    area = stats[i, cv2.CC_STAT_AREA]
+                    if area < 500:  # 忽略小区域
+                        continue
+                        
+                    # 提取该区域的掩码
+                    region_mask = (labels == i)
+                    
+                    # 分析区域颜色
+                    img = self.viewer.cv_img.copy()
+                    masked_img = img.copy()
+                    masked_img[~region_mask] = 0
+                    
+                    color_infos = self.color_analyzer.analyze_image_colors(masked_img, region_mask)
+                    if not color_infos:
+                        continue
+                        
+                    color_info = color_infos[0]
+                    
+                    # 创建新的标注
+                    mask_id = len(self.viewer.masks) if self.viewer.masks else 0
+                    
+                    if self.viewer.masks is None:
+                        self.viewer.masks = {}
+                        
+                    print(f"[处理] 添加独立区域 {i}, 颜色: {color_info.rgb}, ID: {mask_id}")
+                    self.viewer.masks[mask_id] = {
+                        'mask': region_mask,
+                        'color': color_info.rgb,
+                        'visible': True,
+                        'editable': False
+                    }
+                    
+                    # 添加到表格
+                    self.add_annotation_to_table(color_info, mask_id)
+            
+            else:
+                print(f"[错误] 不支持的掩码格式: shape={mask.shape}")
                 return
-
-            # 分析掩码区域的主要颜色
-            print("[分析] 开始分析掩码区域的颜色...")
-            img = self.viewer.cv_img.copy()
-            masked_img = img.copy()
-            masked_img[~mask] = 0  # 将非掩码区域设为黑色
-            
-            # 使用颜色分析器分析主色
-            color_infos = self.color_analyzer.analyze_image_colors(masked_img, mask)
-            if not color_infos:
-                print("[警告] 无法分析颜色")
-                return
-                
-            color_info = color_infos[0]  # 获取占比最大的颜色
-            print(f"[分析] 检测到主色: RGB={color_info.rgb}, 占比={color_info.percentage:.1%}")
-            
-            # 创建新的标注
-            mask_id = len(self.viewer.masks) if self.viewer.masks else 0
-            
-            # 添加到标注列表
-            if self.viewer.masks is None:
-                self.viewer.masks = {}
-                
-            print(f"[处理] 添加新掩码 ID: {mask_id}")
-            self.viewer.masks[mask_id] = {
-                'mask': mask.copy(),  # 创建副本以避免引用问题
-                'color': color_info.rgb,  # 使用分析出的主色
-                'visible': True,
-                'editable': False
-            }
-            
-            # 添加到表格
-            self.add_annotation_to_table(color_info, mask_id)
             
             # 更新显示
             print("[更新] 刷新预览...")
