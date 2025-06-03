@@ -395,6 +395,17 @@ class MainWindow(QMainWindow):
         magnifier_box.setChecked(True)  # 默认打开放大镜
         magnifier_box.stateChanged.connect(self.toggle_magnifier)
 
+        # 添加未保存修改的標記
+        self.has_unsaved_changes = False
+        
+        # 連接信號到槽
+        self.viewer.point_added.connect(self.on_annotation_changed)
+        self.viewer.mask_updated.connect(self.on_annotation_changed)
+
+    def on_annotation_changed(self):
+        """當有標定修改時被調用"""
+        self.has_unsaved_changes = True
+
     def run_segmentation(self):
         """执行基于点的人工标定分割"""
         try:
@@ -992,12 +1003,13 @@ class MainWindow(QMainWindow):
             with open(save_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
 
-            QMessageBox.information(self, "保存成功", f"标定数据已保存至：\n{save_path}")
+            self.has_unsaved_changes = False  # 重置未保存標記
+            QMessageBox.information(self, "保存成功", f"標定數據已保存至：\n{save_path}")
             
         except Exception as e:
-            error_msg = f"保存失败: {str(e)}"
-            print(f"[错误] {error_msg}")
-            QMessageBox.critical(self, "保存失败", error_msg)
+            error_msg = f"保存失敗: {str(e)}"
+            print(f"[錯誤] {error_msg}")
+            QMessageBox.critical(self, "保存失敗", error_msg)
 
     def open_image(self):
         # 获取当前文件所在目录
@@ -1655,6 +1667,27 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'magnifier_window'):
                 self.magnifier_window.setFixedSize(magnifier_size, magnifier_size)
                 print(f"[更新] 放大镜尺寸调整为: {magnifier_size}x{magnifier_size}像素")
+
+    def closeEvent(self, event):
+        """窗口關閉事件處理"""
+        if self.has_unsaved_changes:
+            reply = QMessageBox.question(
+                self,
+                "未保存的修改",
+                "您有未保存的标定修改，是否要保存？",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Save
+            )
+            
+            if reply == QMessageBox.Save:
+                self.save_annotations_to_json()
+                event.accept()
+            elif reply == QMessageBox.Discard:
+                event.accept()
+            else:
+                event.ignore()
+        else:
+            event.accept()
 
 # 添加可点击的颜色标签类
 class ClickableColorLabel(QLabel):

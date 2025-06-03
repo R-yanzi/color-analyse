@@ -25,6 +25,8 @@ class ImageViewer(QLabel):
     scaleChanged = pyqtSignal(float)
     annotationAdded = pyqtSignal(tuple)  # 💡 新增发主色信号，(R, G, B)
     magnifierUpdated = pyqtSignal(QPixmap)  # 新增放大镜信号
+    point_added = pyqtSignal()  # 添加點時的信號
+    mask_updated = pyqtSignal()  # 掩碼更新時的信號
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -281,24 +283,45 @@ class ImageViewer(QLabel):
     def mousePressEvent(self, event):
         self.setFocus()  # 鼠标点击时抢焦点，确保能按快捷键
 
-        if self.mode in ("erase", "add"):
-            if event.button() == Qt.LeftButton:
-                # 开始新的编辑动作
-                self.is_editing = True
-                self.magnifier_active = True  # 激活放大镜
+        if self.cv_img is None:
+            return
 
-                # 只在首次点击时记录 undo（若当前掩码是可编辑）
-                if self.mask is not None and self.masks.get(self.pending_mask_id, {}).get("editable", False):
-                    self.undo_stack.append(self.mask.copy())
-                    self.redo_stack.clear()
+        if self.mode == "add":
+            # 开始新的编辑动作
+            self.is_editing = True
+            self.magnifier_active = True  # 激活放大镜
 
-                img_pos = self.map_to_image(event.pos())
-                x, y = int(img_pos.x()), int(img_pos.y())
-                print(f"[修改掩码] 当前模式: {self.mode}，位置: ({x}, {y})")
-                self.modify_mask(x, y, save_history=True)
-                
-                # 更新放大镜
-                self.update_magnifier(event.pos())
+            # 只在首次点击时记录 undo（若当前掩码是可编辑）
+            if self.mask is not None and self.masks.get(self.pending_mask_id, {}).get("editable", False):
+                self.undo_stack.append(self.mask.copy())
+                self.redo_stack.clear()
+
+            img_pos = self.map_to_image(event.pos())
+            x, y = int(img_pos.x()), int(img_pos.y())
+            print(f"[修改掩码] 当前模式: {self.mode}，位置: ({x}, {y})")
+            self.modify_mask(x, y, save_history=True)
+            
+            # 更新放大镜
+            self.update_magnifier(event.pos())
+            self.mask_updated.emit()  # 發送掩碼更新信號
+        elif self.mode == "erase":
+            # 开始新的编辑动作
+            self.is_editing = True
+            self.magnifier_active = True  # 激活放大镜
+
+            # 只在首次点击时记录 undo（若当前掩码是可编辑）
+            if self.mask is not None and self.masks.get(self.pending_mask_id, {}).get("editable", False):
+                self.undo_stack.append(self.mask.copy())
+                self.redo_stack.clear()
+
+            img_pos = self.map_to_image(event.pos())
+            x, y = int(img_pos.x()), int(img_pos.y())
+            print(f"[修改掩码] 当前模式: {self.mode}，位置: ({x}, {y})")
+            self.modify_mask(x, y, save_history=True)
+            
+            # 更新放大镜
+            self.update_magnifier(event.pos())
+            self.mask_updated.emit()  # 發送掩碼更新信號
         else:
             # 正常模式下添加前景点/背景点/拖动
             if event.button() == Qt.LeftButton:
@@ -310,6 +333,7 @@ class ImageViewer(QLabel):
                     self.bg_points.append((x, y))
                     self.point_undo_stack.append(("bg", (x, y)))  # 💡 添加撤销记录
                     self.point_redo_stack.clear()
+                    self.point_added.emit()  # 發送點添加信號
                     self.repaint()
                 else:
                     # 左键拖动
@@ -325,6 +349,7 @@ class ImageViewer(QLabel):
                 self.fg_points.append((x, y))
                 self.point_undo_stack.append(("fg", (x, y)))  # 💡 添加撤销记录
                 self.point_redo_stack.clear()
+                self.point_added.emit()  # 發送點添加信號
                 self.repaint()
 
     def keyPressEvent(self, event):
