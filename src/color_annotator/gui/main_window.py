@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QPushButton, QFileDialog, QVBoxLayout,
     QWidget, QHBoxLayout, QSlider, QLabel, QTableWidget, QAbstractItemView,
     QTableWidgetItem, QPushButton, QHeaderView, QLineEdit, QMessageBox, QCheckBox, QGridLayout,
-    QColorDialog, QApplication, QSizePolicy, QDockWidget, QShortcut
+    QColorDialog, QApplication, QSizePolicy, QDockWidget, QShortcut, QDialog
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from .image_viewer import ImageViewer
@@ -18,6 +18,7 @@ from .ai_segmentation import AISegmentationWidget
 from pathlib import Path
 import time
 from PyQt5.QtGui import QKeySequence
+from .history_dialog import HistoryDialog
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -75,7 +76,25 @@ class MainWindow(QMainWindow):
         save_btn = QPushButton("保存数据 (F2)")
         save_btn.clicked.connect(self.save_annotations_to_json)
         save_btn.setShortcut("F2")
-
+        
+        # 添加历史记录按钮
+        history_btn = QPushButton("历史记录 (F3)")
+        history_btn.clicked.connect(self.show_history_dialog)
+        history_btn.setShortcut("F3")
+        history_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                border: none;
+                padding: 4px 12px;
+                border-radius: 4px;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #138496;
+            }
+        """)
+        
         zoom_label = QLabel("缩放：")
         self.scale_slider = QSlider(Qt.Horizontal)
         self.scale_slider.setRange(10, 300)
@@ -90,6 +109,26 @@ class MainWindow(QMainWindow):
         control_bar.addWidget(save_btn)
         control_bar.addWidget(open_btn)
         control_bar.addWidget(reset_btn)
+        
+        # 添加历史记录按钮
+        history_btn = QPushButton("历史记录 (F3)")
+        history_btn.clicked.connect(self.show_history_dialog)
+        history_btn.setShortcut("F3")
+        history_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                border: none;
+                padding: 4px 12px;
+                border-radius: 4px;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #138496;
+            }
+        """)
+        control_bar.addWidget(history_btn)
+        
         control_bar.addWidget(zoom_label)
         control_bar.addWidget(self.scale_slider)
         control_bar.addWidget(self.scale_label)
@@ -1061,12 +1100,12 @@ class MainWindow(QMainWindow):
                 json.dump(data, f, indent=2, ensure_ascii=False)
 
             self.has_unsaved_changes = False  # 重置未保存標記
-            QMessageBox.information(self, "保存成功", f"標定數據已保存至：\n{save_path}")
+            QMessageBox.information(self, "保存成功", f"标定数据已保存至：\n{save_path}")
             
         except Exception as e:
-            error_msg = f"保存失敗: {str(e)}"
-            print(f"[錯誤] {error_msg}")
-            QMessageBox.critical(self, "保存失敗", error_msg)
+            error_msg = f"保存失败: {str(e)}"
+            print(f"[错误] {error_msg}")
+            QMessageBox.critical(self, "保存失败", error_msg)
 
     def open_image(self):
         # 获取当前文件所在目录
@@ -1767,6 +1806,104 @@ class MainWindow(QMainWindow):
                 event.ignore()
         else:
             event.accept()
+
+    def show_history_dialog(self):
+        """显示历史记录对话框"""
+        try:
+            if not hasattr(self, 'history_manager'):
+                from src.color_annotator.utils.history_manager import HistoryManager
+                self.history_manager = HistoryManager()
+            
+            # 修改检查图像是否加载的逻辑
+            if not hasattr(self.viewer, 'cv_img') or self.viewer.cv_img is None:
+                QMessageBox.warning(self, "提示", "请先打开一张图片")
+                return
+                
+            if not hasattr(self.viewer, 'image_path') or not self.viewer.image_path:
+                QMessageBox.warning(self, "提示", "无法确定图像路径")
+                return
+                
+            # 设置当前图像
+            self.history_manager.set_current_image(self.viewer.image_path)
+            
+            # 如果有未保存的修改，先保存一个快照
+            if self.has_unsaved_changes:
+                reply = QMessageBox.question(
+                    self,
+                    "未保存的修改",
+                    "您有未保存的修改，是否要先创建一个历史快照？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                
+                if reply == QMessageBox.Yes:
+                    self.history_manager.save_snapshot(
+                        self.viewer.masks,
+                        description="自动保存的快照"
+                    )
+            
+            # 创建并显示历史记录对话框
+            dialog = HistoryDialog(self.history_manager, self)
+            dialog.historySelected.connect(self.restore_history_snapshot)
+            
+            if dialog.exec_() == QDialog.Accepted:
+                print("[历史记录] 已恢复到选定的历史状态")
+            
+        except Exception as e:
+            print(f"[错误] 显示历史记录对话框时出错: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            QMessageBox.critical(self, "错误", f"显示历史记录对话框时出错：{str(e)}")
+
+    def restore_history_snapshot(self, snapshot_id):
+        """恢复到指定的历史快照"""
+        try:
+            # 恢复掩码数据
+            restored_masks = self.history_manager.restore_snapshot(snapshot_id)
+            if not restored_masks:
+                QMessageBox.warning(self, "恢复失败", "无法恢复选定的历史状态")
+                return
+                
+            # 更新viewer的掩码
+            self.viewer.masks = restored_masks
+            self.viewer.update()
+            
+            # 清空表格
+            self.annotation_table.setRowCount(0)
+            
+            # 重新添加所有掩码到表格
+            for mask_id, entry in restored_masks.items():
+                try:
+                    # 计算掩码占比
+                    mask = entry.get("mask", None)
+                    if mask is not None:
+                        percentage = np.sum(mask) / (mask.shape[0] * mask.shape[1])
+                    else:
+                        percentage = 0
+                        
+                    # 创建颜色信息对象
+                    from src.color_annotator.utils.color_analyzer import ColorInfo
+                    color_info = ColorInfo(rgb=entry.get("color", (0, 255, 0)), percentage=percentage)
+                    
+                    # 添加到表格
+                    self.add_annotation_to_table(color_info, mask_id)
+                    
+                except Exception as e:
+                    print(f"[警告] 恢复掩码 {mask_id} 到表格时出错: {str(e)}")
+                    continue
+            
+            # 更新预览
+            self.update_annotation_preview()
+            self.update_color_pie_chart()
+            
+            # 重置未保存标记
+            self.has_unsaved_changes = False
+            
+        except Exception as e:
+            print(f"[错误] 恢复历史状态时出错: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            QMessageBox.critical(self, "错误", f"恢复历史状态时出错：{str(e)}")
 
 # 添加可点击的颜色标签类
 class ClickableColorLabel(QLabel):
