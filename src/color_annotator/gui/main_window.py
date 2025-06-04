@@ -20,6 +20,8 @@ import time
 from PyQt5.QtGui import QKeySequence
 from .history_dialog import HistoryDialog
 from datetime import datetime
+import matplotlib
+import platform
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -596,6 +598,11 @@ class MainWindow(QMainWindow):
             row = self.find_row_by_mask_id(self.pending_mask_id)
             is_editing = row != -1
 
+            # 计算当前掩码的占比（临时值）
+            current_mask_pixels = np.sum(mask_data)
+            total_mask_pixels = sum(np.sum(m['mask']) for m in self.viewer.masks.values())
+            percentage = current_mask_pixels / total_mask_pixels if total_mask_pixels > 0 else 0.0
+
             if is_editing:
                 # 编辑现有标定：保持原有颜色
                 print(f"[保存] 更新现有标定 {self.pending_mask_id}")
@@ -610,14 +617,14 @@ class MainWindow(QMainWindow):
                     print("[警告] 无法获取颜色信息，使用默认颜色")
                 
                 self.viewer.masks[self.pending_mask_id]['color'] = (r, g, b)
-                
+
                 # 重新计算所有掩码的占比
                 total_pixels = self.viewer.cv_img.shape[0] * self.viewer.cv_img.shape[1]
                 visible_masks = {k: v for k, v in self.viewer.masks.items() if v.get('visible', True)}
-                
+
                 # 计算所有可见掩码的总像素数
                 total_mask_pixels = sum(np.sum(mask['mask']) for mask in visible_masks.values())
-                
+
                 # 更新当前掩码的占比
                 current_mask_pixels = np.sum(mask_data)
                 if total_mask_pixels > 0:
@@ -631,7 +638,10 @@ class MainWindow(QMainWindow):
                 
                 # 更新行显示
                 self.update_annotation_row(row, color_info, self.pending_mask_id)
-                
+
+                # 强制更新所有行的占比
+                self.update_percentage_in_table()
+
             else:
                 # 新增标定：提取新的颜色
                 print("[保存] 创建新标定")
@@ -723,7 +733,24 @@ class MainWindow(QMainWindow):
         
         color_label.clicked.connect(lambda: self.show_color_dialog(row))
         self.annotation_table.setCellWidget(row, 1, color_container)
-            
+
+        # 计算当前行的占比（临时值）
+        if mask_id in self.viewer.masks:
+            mask_pixels = np.sum(self.viewer.masks[mask_id]['mask'])
+            total_mask_pixels = sum(np.sum(m['mask']) for m in self.viewer.masks.values())
+            percentage = mask_pixels / total_mask_pixels if total_mask_pixels > 0 else 0.0
+        else:
+            percentage = 0.0
+
+        # 设置当前行的占比（后续会被全局更新覆盖，但避免显示空白）
+        percentage_item = QTableWidgetItem(f"{percentage:.1%}")
+        percentage_item.setFlags(percentage_item.flags() & ~Qt.ItemIsEditable)
+        percentage_item.setTextAlignment(Qt.AlignCenter)
+        self.annotation_table.setItem(row, 2, percentage_item)
+
+        # 强制更新所有行的占比
+        self.update_percentage_in_table()
+
         # 占比列（不可编辑）
         percentage_item = QTableWidgetItem(f"{percentage:.1%}")
         percentage_item.setFlags(percentage_item.flags() & ~Qt.ItemIsEditable)
@@ -817,27 +844,29 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
-        
+
         if reply == QMessageBox.Yes:
             try:
                 # 从masks字典中删除
                 if mask_id in self.viewer.masks:
                     del self.viewer.masks[mask_id]
-                
+
                 # 从表格中删除行
                 self.annotation_table.removeRow(row)
-                
+
                 # 更新剩余行的编号
                 for i in range(self.annotation_table.rowCount()):
                     id_item = self.annotation_table.item(i, 0)
                     if id_item:
                         id_item.setText(str(i + 1))
-                
+
+                self.update_percentage_in_table()
+
                 # 清理相关状态
                 if self.viewer.pending_mask_id == mask_id:
                     self.viewer.pending_mask_id = None
                     self.viewer.mask = None
-                
+
                 # 如果删除后没有任何标注，清空饼图
                 if self.annotation_table.rowCount() == 0:
                     self.color_pie_chart_label.clear()
@@ -848,10 +877,10 @@ class MainWindow(QMainWindow):
                     # 刷新显示
                     self.update_annotation_preview()
                     self.update_color_pie_chart()
-                
+
                 # 刷新视图
                 self.viewer.repaint()
-                
+
                 print(f"[删除] 掩码 {mask_id} 已删除")
             except Exception as e:
                 print(f"[错误] 删除失败: {e}")
@@ -964,10 +993,10 @@ class MainWindow(QMainWindow):
                     mask_data = self.viewer.masks[mask_id]
                     mask = mask_data.get('mask')
                     mask_pixel_count = np.sum(mask)  # 掩码中的像素数
-                    
+
                     # 从ID项获取RGB值
                     r, g, b = id_item.data(Qt.UserRole + 1)
-                    
+
                     # 保存掩码数据
                     mask_pixels[mask_id] = {
                         'count': mask_pixel_count,
@@ -976,11 +1005,11 @@ class MainWindow(QMainWindow):
 
         # 计算所有掩码的总像素数
         total_mask_pixels = sum(data['count'] for data in mask_pixels.values())
-        
+
         if total_mask_pixels == 0:
             self.color_pie_chart_label.setText("无标定数据")
             return
-        
+
         # 计算每个掩码的占比（基于总掩码像素）
         for mask_id, data in mask_pixels.items():
             percentage = data['count'] / total_pixels  # 使用图像总像素计算真实占比
@@ -1053,17 +1082,38 @@ class MainWindow(QMainWindow):
             print(traceback.format_exc())
             self.color_pie_chart_label.setText("饼图生成失败")
 
-    def update_percentage_in_table(self, mask_pixels, total_mask_pixels):
-        """更新表格中的占比数据"""
+    def update_percentage_in_table(self):
+        """更新表格中的占比列（基于所有掩码像素总和）"""
+        # 计算所有掩码的总像素
+        total_mask_pixels = 0
+        mask_pixel_counts = {}  # {mask_id: pixel_count}
+
+        # 先遍历所有掩码，计算总像素（只统计仍然存在的掩码）
         for row in range(self.annotation_table.rowCount()):
             id_item = self.annotation_table.item(row, 0)
             if id_item:
                 mask_id = id_item.data(Qt.UserRole)
-                if mask_id in mask_pixels:
-                    # 计算百分比
-                    percentage = mask_pixels[mask_id]['count'] / total_mask_pixels
-                    
-                    # 更新表格中的占比显示
+                if mask_id and mask_id in self.viewer.masks:  # 确保掩码仍然存在
+                    mask = self.viewer.masks[mask_id]['mask']
+                    mask_pixels = np.sum(mask)
+                    mask_pixel_counts[mask_id] = mask_pixels
+                    total_mask_pixels += mask_pixels
+
+        if total_mask_pixels == 0:
+            # 如果没有掩码，将所有行的占比设为0%
+            for row in range(self.annotation_table.rowCount()):
+                percentage_item = self.annotation_table.item(row, 2)
+                if percentage_item:
+                    percentage_item.setText("0.0%")
+            return
+
+        # 更新表格中的占比
+        for row in range(self.annotation_table.rowCount()):
+            id_item = self.annotation_table.item(row, 0)
+            if id_item:
+                mask_id = id_item.data(Qt.UserRole)
+                if mask_id in mask_pixel_counts:
+                    percentage = mask_pixel_counts[mask_id] / total_mask_pixels
                     percentage_item = self.annotation_table.item(row, 2)
                     if percentage_item:
                         percentage_item.setText(f"{percentage:.1%}")
@@ -1072,6 +1122,12 @@ class MainWindow(QMainWindow):
                         percentage_item.setFlags(percentage_item.flags() & ~Qt.ItemIsEditable)
                         percentage_item.setTextAlignment(Qt.AlignCenter)
                         self.annotation_table.setItem(row, 2, percentage_item)
+
+                else:
+                    # 如果掩码已被删除，但表格行仍存在（比如还没刷新），设为0%
+                    percentage_item = self.annotation_table.item(row, 2)
+                    if percentage_item:
+                        percentage_item.setText("0.0%")
 
     def toggle_mask_visibility(self, row, checked):
         """切换掩码可见性"""
@@ -1126,11 +1182,14 @@ class MainWindow(QMainWindow):
             # 更新预览
             self.update_annotation_preview()
             self.update_color_pie_chart()
+            self.update_percentage_in_table()
+
 
         except Exception as e:
             print(f"[错误] 切换掩码可见性失败: {str(e)}")
             import traceback
             print(traceback.format_exc())
+
 
     def edit_annotation(self, row, mask_id):
         print(f"[编辑] 开始编辑掩码 {mask_id}")
@@ -1229,6 +1288,7 @@ class MainWindow(QMainWindow):
                     # 更新预览
                     self.update_annotation_preview()
                     self.update_color_pie_chart()
+                    self.update_percentage_in_table()
                 else:
                     # 清空显示
                     self.annotation_table.setRowCount(0)
@@ -1414,6 +1474,7 @@ class MainWindow(QMainWindow):
                 
                 # 更新颜色饼图
                 self.update_color_pie_chart()
+                self.update_percentage_in_table()
         except Exception as e:
             QMessageBox.warning(self, "错误", f"修改颜色时出错：{str(e)}")
 
@@ -1623,6 +1684,7 @@ class MainWindow(QMainWindow):
             print("[更新] 刷新预览...")
             self.update_annotation_preview()
             self.update_color_pie_chart()
+            self.update_percentage_in_table()
             print("[完成] 分割结果处理完成")
             
         except Exception as e:
@@ -1959,4 +2021,3 @@ class ClickableColorLabel(QLabel):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
-
