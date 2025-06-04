@@ -424,10 +424,26 @@ class MainWindow(QMainWindow):
 
     def cache_annotation(self, color_and_mask):
         """缓存标注信息"""
-        color_info, mask_id = color_and_mask
-        self.pending_annotation = color_info
-        self.pending_mask_id = mask_id
-        # self.viewer.set_mask_visibility(mask_id, False)  # 保存前默认隐藏
+        try:
+            # 检查color_and_mask是否是元组或列表
+            if not isinstance(color_and_mask, (tuple, list)):
+                print(f"[错误] color_and_mask类型无效: {type(color_and_mask)}")
+                return
+                
+            # 检查color_and_mask的长度
+            if len(color_and_mask) != 2:
+                print(f"[错误] color_and_mask长度不正确: {len(color_and_mask)}")
+                return
+                
+            color_info, mask_id = color_and_mask
+            self.pending_annotation = color_info
+            self.pending_mask_id = mask_id
+            print(f"[缓存] 成功缓存标注信息: color_info={color_info}, mask_id={mask_id}")
+            
+        except Exception as e:
+            print(f"[错误] 缓存标注信息时出错: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
 
     def save_annotation(self):
         """保存当前标定"""
@@ -713,107 +729,119 @@ class MainWindow(QMainWindow):
         return rle
 
     def update_annotation_preview(self):
-        if self.viewer.cv_img is None:
-            return
+        """更新标注预览"""
+        try:
+            if self.viewer.cv_img is None:
+                print("[提示] 没有加载图像，无法更新预览")
+                return
 
-        img = self.viewer.cv_img.copy()
-        overlay = np.zeros_like(img, dtype=np.uint8)
+            img = self.viewer.cv_img.copy()
+            overlay = np.zeros_like(img, dtype=np.uint8)
+            has_valid_mask = False
 
-        for entry in self.viewer.masks.values():
-            if not entry.get("visible", True):
-                continue
-            mask = entry.get("mask")
-            if mask is None or mask.shape != overlay.shape[:2]:
-                continue
-            color = entry.get("color", (0, 255, 0))
-            r, g, b = color
-            overlay[mask] = (b, g, r)
+            for entry in self.viewer.masks.values():
+                if not entry.get("visible", True):
+                    continue
+                    
+                mask = entry.get("mask")
+                if mask is None:
+                    continue
+                    
+                # 确保掩码形状正确
+                if mask.shape != overlay.shape[:2]:
+                    print(f"[警告] 掩码形状不匹配: mask={mask.shape}, overlay={overlay.shape[:2]}")
+                    continue
+                    
+                color = entry.get("color", (0, 255, 0))
+                if not isinstance(color, (tuple, list)) or len(color) != 3:
+                    print(f"[警告] 颜色格式无效: {color}")
+                    continue
+                    
+                r, g, b = color
+                overlay[mask] = (b, g, r)
+                has_valid_mask = True
 
-        # 叠加时只让掩码部分半透明，其余部分完全显示原图
-        alpha = 0.9
-        mask_area = (overlay > 0).any(axis=2)
-        preview = img.copy()
-        preview[mask_area] = cv2.addWeighted(img[mask_area], 1 - alpha, overlay[mask_area], alpha, 0)
+            if not has_valid_mask:
+                print("[提示] 没有有效的掩码可显示")
+                self.annotation_preview_label.clear()
+                self.annotation_preview_label.setText("无标注数据")
+                return
 
-        preview_rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
-        h, w, _ = preview_rgb.shape
-        qimg = QImage(preview_rgb.data, w, h, w * 3, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qimg)
+            # 叠加时只让掩码部分半透明，其余部分完全显示原图
+            alpha = 0.9
+            mask_area = (overlay > 0).any(axis=2)
+            if not mask_area.any():
+                print("[提示] 没有有效的掩码区域")
+                self.annotation_preview_label.clear()
+                self.annotation_preview_label.setText("无标注数据")
+                return
 
-        self.annotation_preview_label.setPixmap(
-            pixmap.scaled(self.annotation_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        )
+            preview = img.copy()
+            preview[mask_area] = cv2.addWeighted(img[mask_area], 1 - alpha, overlay[mask_area], alpha, 0)
+
+            preview_rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+            h, w, _ = preview_rgb.shape
+            qimg = QImage(preview_rgb.data, w, h, w * 3, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimg)
+
+            self.annotation_preview_label.setPixmap(
+                pixmap.scaled(self.annotation_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+            
+        except Exception as e:
+            print(f"[错误] 更新预览图时出错: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            self.annotation_preview_label.clear()
+            self.annotation_preview_label.setText("预览更新失败")
 
     def update_color_pie_chart(self):
-        """更新颜色饼图，确保掩码占比总和为100%"""
+        """更新颜色饼图，显示所有已保存的标定的比例"""
         if self.viewer.cv_img is None:
             self.color_pie_chart_label.setText("无图片")
             return
 
-        # 从masks字典中计算所有可见掩码的像素总数
+        # 从masks字典中计算所有掩码的像素总数（不考虑可见性）
         total_pixels = self.viewer.cv_img.shape[0] * self.viewer.cv_img.shape[1]  # 图像总像素
         colors_data = []
         mask_pixels = {}
 
-        # 先计算每个掩码的像素数量和对应颜色
+        # 计算每个掩码的像素数量和对应颜色（包括不可见的掩码）
         for row in range(self.annotation_table.rowCount()):
             id_item = self.annotation_table.item(row, 0)
             if id_item:
                 mask_id = id_item.data(Qt.UserRole)
                 if mask_id and mask_id in self.viewer.masks:
                     mask_data = self.viewer.masks[mask_id]
+                    mask = mask_data.get('mask')
+                    mask_pixel_count = np.sum(mask)  # 掩码中的像素数
                     
-                    # 只计算可见的掩码
-                    if mask_data.get('visible', True):
-                        mask = mask_data.get('mask')
-                        mask_pixel_count = np.sum(mask)  # 掩码中的像素数
-                        
-                        # 从ID项获取RGB值
-                        r, g, b = id_item.data(Qt.UserRole + 1)
-                        
-                        # 保存掩码数据
-                        mask_pixels[mask_id] = {
-                            'count': mask_pixel_count,
-                            'rgb': (r, g, b)
-                        }
+                    # 从ID项获取RGB值
+                    r, g, b = id_item.data(Qt.UserRole + 1)
+                    
+                    # 保存掩码数据
+                    mask_pixels[mask_id] = {
+                        'count': mask_pixel_count,
+                        'rgb': (r, g, b)
+                    }
 
-        # 计算所有可见掩码的总像素数
+        # 计算所有掩码的总像素数
         total_mask_pixels = sum(data['count'] for data in mask_pixels.values())
         
         if total_mask_pixels == 0:
-            self.color_pie_chart_label.setText("无可见掩码")
+            self.color_pie_chart_label.setText("无标定数据")
             return
         
         # 计算每个掩码的占比（基于总掩码像素）
         for mask_id, data in mask_pixels.items():
-            percentage = data['count'] / total_mask_pixels
+            percentage = data['count'] / total_pixels  # 使用图像总像素计算真实占比
             colors_data.append({
                 'rgb': data['rgb'],
                 'percentage': percentage
             })
-        
-        # 更新表格中的占比数据
-        self.update_percentage_in_table(mask_pixels, total_mask_pixels)
             
-        # 绘制饼图 - 优化字体设置
-        # 尝试多种中文字体，适应不同操作系统
-        chinese_fonts = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', 
-                         'PingFang SC', 'Hiragino Sans GB', 'Noto Sans CJK SC', 
-                         'Source Han Sans CN', 'Arial Unicode MS', 'sans-serif']
-        
-        # 使用matplotlib的font_manager检测可用字体
-        import matplotlib.font_manager as fm
-        import platform
-        
-        # 根据操作系统类型设置默认字体
-        system = platform.system()
-        if system == 'Windows':
-            plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei'] + plt.rcParams['font.sans-serif']
-        elif system == 'Darwin':  # macOS
-            plt.rcParams['font.sans-serif'] = ['PingFang SC', 'Hiragino Sans GB'] + plt.rcParams['font.sans-serif']
-        else:  # Linux
-            plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'Noto Sans CJK SC'] + plt.rcParams['font.sans-serif']
-            
+        # 设置matplotlib字体
+        plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei'] + plt.rcParams['font.sans-serif']
         plt.rcParams['axes.unicode_minus'] = False
 
         plt.clf()
@@ -823,21 +851,24 @@ class MainWindow(QMainWindow):
         sizes = [data['percentage'] for data in colors_data]
         colors = [f"#{r:02x}{g:02x}{b:02x}" for data in colors_data for r, g, b in [data['rgb']]]
 
-        # 绘制饼图
-        wedges, texts = ax.pie(
+        # 绘制饼图 - 修复返回值解包问题
+        patches = ax.pie(
             sizes,
             colors=colors,
             labels=[''] * len(colors),
-            autopct=None,
+            autopct='%1.1f%%',  # 显示百分比
             startangle=90
         )
+        
+        # 正确获取wedges
+        wedges = patches[0]  # patches[0]是饼图的切片列表
 
-        # 添加图例 - 使用英文避免中文显示问题
+        # 添加图例
         legend_labels = [f'{data["percentage"]:.1%}' for data in colors_data]
         legend = ax.legend(
             wedges,
             legend_labels,
-            title="Color Ratio",  # 使用英文"颜色占比"
+            title="颜色占比",
             loc="center left",
             bbox_to_anchor=(1, 0, 0.5, 1),
             fontsize=14,
@@ -896,35 +927,61 @@ class MainWindow(QMainWindow):
     def toggle_mask_visibility(self, row, checked):
         """切换掩码可见性"""
         try:
+            # 检查参数有效性
+            if row is None:
+                print("[错误] 无效的行号: None")
+                return
+                
+            if not isinstance(row, int):
+                print(f"[错误] 行号类型无效: {type(row)}")
+                return
+                
             # 从编号列获取 mask_id
             id_item = self.annotation_table.item(row, 0)
             if not id_item:
+                print(f"[错误] 未找到行 {row} 的编号项")
                 return
                 
             mask_id = id_item.data(Qt.UserRole)
             if not mask_id:
+                print(f"[错误] 行 {row} 未找到有效的mask_id")
                 return
 
             # 从ID项获取RGB值
-            r, g, b = id_item.data(Qt.UserRole + 1)
+            rgb_data = id_item.data(Qt.UserRole + 1)
+            if not rgb_data or not isinstance(rgb_data, (tuple, list)) or len(rgb_data) != 3:
+                print(f"[错误] 行 {row} 的RGB值无效: {rgb_data}")
+                return
+                
+            r, g, b = rgb_data
 
             # 获取可见性按钮并更新显示
             visibility_widget = self.annotation_table.cellWidget(row, 3)
-            if visibility_widget:
-                visibility_btn = visibility_widget.findChild(QPushButton)
-                if visibility_btn:
-                    if checked:
-                        visibility_btn.setText("●")  # 实心圆点表示可见
-                        self.viewer.set_mask_visibility(mask_id, True, (r, g, b))
-                    else:
-                        visibility_btn.setText("○")  # 空心圆圈表示不可见
-                        self.viewer.set_mask_visibility(mask_id, False)
+            if not visibility_widget:
+                print(f"[错误] 行 {row} 未找到可见性控件")
+                return
+                
+            visibility_btn = visibility_widget.findChild(QPushButton)
+            if not visibility_btn:
+                print(f"[错误] 行 {row} 未找到可见性按钮")
+                return
 
+            # 更新按钮状态和掩码可见性
+            if checked:
+                visibility_btn.setText("●")  # 实心圆点表示可见
+                self.viewer.set_mask_visibility(mask_id, True, (r, g, b))
+            else:
+                visibility_btn.setText("○")  # 空心圆圈表示不可见
+                self.viewer.set_mask_visibility(mask_id, False)
+
+            # 更新预览
             self.update_annotation_preview()
             self.update_color_pie_chart()
 
         except Exception as e:
             print(f"[错误] 切换掩码可见性失败: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
 
     def edit_annotation(self, row, mask_id):
         print(f"[编辑] 开始编辑掩码 {mask_id}")
@@ -1044,38 +1101,56 @@ class MainWindow(QMainWindow):
             json_path = os.path.join("annotations", base_name + ".json")
             
             try:
+                if not os.path.exists(json_path):
+                    print(f"[提示] 未找到对应的标注文件: {json_path}")
+                    # 清空显示
+                    self.annotation_table.setRowCount(0)
+                    self.annotation_preview_label.clear()
+                    self.color_pie_chart_label.clear()
+                    self.annotation_preview_label.setText("无标注数据")
+                    self.color_pie_chart_label.setText("无标注数据")
+                    return
+
                 masks = self.viewer.load_masks_from_json(json_path)
                 if masks:
                     # === 同步表格显示 ===
                     self.annotation_table.setRowCount(0)
                     for mask_id, entry in masks.items():
-                        # 从 ColorInfo 或者 RGB 元组创建颜色信息
-                        color = entry.get("color", (0, 255, 0))
-                        if isinstance(color, (list, tuple)):
-                            from src.color_annotator.utils.color_analyzer import ColorInfo
-                            # 计算掩码占比
-                            mask = entry.get("mask", None)
-                            if mask is not None:
-                                percentage = np.sum(mask) / (mask.shape[0] * mask.shape[1])
+                        try:
+                            # 从 ColorInfo 或者 RGB 元组创建颜色信息
+                            color = entry.get("color", (0, 255, 0))
+                            if isinstance(color, (list, tuple)):
+                                from src.color_annotator.utils.color_analyzer import ColorInfo
+                                # 计算掩码占比
+                                mask = entry.get("mask", None)
+                                if mask is not None:
+                                    percentage = np.sum(mask) / (mask.shape[0] * mask.shape[1])
+                                else:
+                                    percentage = 0
+                                color_info = ColorInfo(rgb=tuple(color), percentage=percentage)
                             else:
-                                percentage = 0
-                            color_info = ColorInfo(rgb=tuple(color), percentage=percentage)
-                        else:
-                            color_info = color
+                                color_info = color
 
-                        # 添加到表格
-                        self.add_annotation_to_table(color_info, mask_id)
+                            # 添加到表格
+                            self.add_annotation_to_table(color_info, mask_id)
 
-                        # 设置掩码显示状态（默认显示）
-                        visible = entry.get("visible", True)
-                        self.viewer.set_mask_visibility(mask_id, visible)
+                            # 设置掩码显示状态（默认显示）
+                            visible = entry.get("visible", True)
+                            self.viewer.set_mask_visibility(mask_id, visible)
 
-                        # 找到对应行，设置显示列为 ✔ / ✖
-                        row = self.find_row_by_mask_id(mask_id)
-                        if row != -1:
-                            show_item = self.annotation_table.item(row, 3)
-                            if show_item:
-                                show_item.setText("✔" if visible else "✖")
+                            # 找到对应行，设置显示列为 ✔ / ✖
+                            row = self.find_row_by_mask_id(mask_id)
+                            if row != -1:
+                                visibility_widget = self.annotation_table.cellWidget(row, 3)
+                                if visibility_widget:
+                                    visibility_btn = visibility_widget.findChild(QPushButton)
+                                    if visibility_btn:
+                                        visibility_btn.setChecked(visible)
+                                        visibility_btn.setText("●" if visible else "○")
+
+                        except Exception as e:
+                            print(f"[警告] 处理掩码 {mask_id} 时出错: {str(e)}")
+                            continue
 
                     # 更新预览
                     self.update_annotation_preview()
@@ -1090,11 +1165,15 @@ class MainWindow(QMainWindow):
 
             except Exception as e:
                 print(f"[错误] 加载标注数据失败: {str(e)}")
+                import traceback
+                print(traceback.format_exc())
                 QMessageBox.warning(self, "加载失败", f"加载标注数据时出错：{str(e)}")
                 # 出错时也清空显示
                 self.annotation_table.setRowCount(0)
                 self.annotation_preview_label.clear()
                 self.color_pie_chart_label.clear()
+                self.annotation_preview_label.setText("无标注数据")
+                self.color_pie_chart_label.setText("无标注数据")
 
             # 更新缩放UI
             self.update_scale_ui()
