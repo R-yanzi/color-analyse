@@ -2060,6 +2060,7 @@ class MainWindow(QMainWindow):
         """恢复到指定的历史快照"""
         try:
             print(f"[历史记录] 开始恢复快照: {snapshot_id}")
+
             
             # 恢复掩码数据
             restored_masks = self.history_manager.restore_snapshot(snapshot_id)
