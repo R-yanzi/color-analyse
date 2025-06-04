@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QPushButton, QFileDialog, QVBoxLayout,
     QWidget, QHBoxLayout, QSlider, QLabel, QTableWidget, QAbstractItemView,
     QTableWidgetItem, QPushButton, QHeaderView, QLineEdit, QMessageBox, QCheckBox, QGridLayout,
-    QColorDialog, QApplication, QSizePolicy, QDockWidget, QShortcut, QDialog
+    QColorDialog, QApplication, QSizePolicy, QDockWidget, QShortcut, QDialog, QSplitter
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from .image_viewer import ImageViewer
@@ -20,13 +20,18 @@ import time
 from PyQt5.QtGui import QKeySequence
 from .history_dialog import HistoryDialog
 from datetime import datetime
-import matplotlib
-import platform
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("畲族服饰图像标定工具")
+        
+        # 添加饼图更新节流控制
+        self.last_pie_update = 0
+        self.pie_update_timer = QTimer(self)
+        self.pie_update_timer.setSingleShot(True)
+        self.pie_update_timer.timeout.connect(self.do_update_color_pie_chart)
+        
         # 设置初始窗口大小为屏幕大小的80%
         screen = QApplication.primaryScreen().geometry()
         self.setGeometry(
@@ -141,24 +146,25 @@ class MainWindow(QMainWindow):
 
         # 表格区域
         self.annotation_table = QTableWidget()
-        self.annotation_table.setColumnCount(5)  # 从8列减少为5列
+        self.annotation_table.setColumnCount(5)
         self.annotation_table.setHorizontalHeaderLabels([
-            "编号", "主色", "占比", "可见", "操作"  # 删除RGB三列
+            "编号", "主色", "占比", "可见", "操作"
         ])
         self.annotation_table.verticalHeader().setVisible(False)
         self.annotation_table.setEditTriggers(QAbstractItemView.DoubleClicked)
         self.annotation_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.annotation_table.setSelectionMode(QAbstractItemView.SingleSelection)
         
-        # 调整列宽
+        # 设置表格的大小策略为扩展
+        self.annotation_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        # 调整列宽比例
         header = self.annotation_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Fixed)
-        column_widths = [50, 150, 80, 70, 170]  # 调整列宽分配
-        for i, width in enumerate(column_widths):
-            self.annotation_table.setColumnWidth(i, width)
-        
-        self.annotation_table.setMinimumWidth(520)  # 调整总宽度
-        self.annotation_table.setMaximumWidth(520)  # 调整总宽度
+        total_width = 520
+        column_ratios = [0.1, 0.29, 0.15, 0.13, 0.33]  # 列宽比例
+        for i, ratio in enumerate(column_ratios):
+            self.annotation_table.setColumnWidth(i, int(total_width * ratio))
         
         # 更新表格样式
         self.annotation_table.setStyleSheet("""
@@ -196,10 +202,8 @@ class MainWindow(QMainWindow):
             }
         """
         
-        for label in [
-            self.annotation_preview_label,
-            self.color_pie_chart_label
-        ]:
+        # 设置标签的大小策略
+        for label in [self.annotation_preview_label, self.color_pie_chart_label]:
             label.setMinimumSize(320, 320)
             label.setAlignment(Qt.AlignCenter)
             label.setStyleSheet(preview_style)
@@ -342,32 +346,104 @@ class MainWindow(QMainWindow):
             }
         """)
 
-        # 右侧布局（表格+饼图）
-        right_layout = QVBoxLayout()
-        right_layout.addWidget(self.annotation_table)
-        
-        # 饼图容器
-        pie_container = QWidget()
-        pie_container.setFixedSize(520, 480)  # 调整饼图容器尺寸，使其更窄
-        pie_layout = QVBoxLayout(pie_container)
-        pie_layout.addWidget(self.color_pie_chart_label)
-        pie_layout.setContentsMargins(0, 0, 0, 0)
-        
-        right_layout.addWidget(pie_container)
-        right_layout.setSpacing(20)
-        right_layout.setContentsMargins(10, 10, 10, 10)
-        
-        right_widget = QWidget()
-        right_widget.setLayout(right_layout)
-        right_widget.setFixedWidth(540)  # 减小右侧区域宽度
-
         # 主图区域（让它填充所有剩余空间）
         center_layout = QVBoxLayout()
+        center_layout.setContentsMargins(0, 0, 0, 0)  # 移除内边距
+        center_layout.setSpacing(10)  # 控制栏和图像查看器之间的间距
         center_layout.addWidget(control_widget)
         center_layout.addWidget(self.viewer, stretch=1)
         center_widget = QWidget()
         center_widget.setLayout(center_layout)
         center_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        # 右侧布局（表格+饼图）
+        right_widget = QWidget()
+        right_widget.setFixedWidth(540)
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 10, 10)  # 移除上边距
+        right_layout.setSpacing(10)  # 保持容器之间的间距
+        
+        # 添加一个空的widget来对齐控制栏高度
+        spacer_widget = QWidget()
+        spacer_widget.setFixedHeight(control_widget.sizeHint().height())
+        right_layout.addWidget(spacer_widget)
+        
+        # 创建分割器
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
+        
+        # 表格容器
+        table_container = QWidget()
+        table_layout = QVBoxLayout(table_container)
+        table_layout.setContentsMargins(5, 5, 5, 5)
+        table_layout.setSpacing(0)
+        
+        # 设置表格样式和策略
+        self.annotation_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.annotation_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.annotation_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        
+        # 设置表格的固定行高
+        self.annotation_table.verticalHeader().setDefaultSectionSize(50)
+        self.annotation_table.verticalHeader().setMinimumSectionSize(50)
+        
+        table_layout.addWidget(self.annotation_table)
+        table_container.setLayout(table_layout)
+        
+        # 设置表格容器样式
+        table_container.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                border: 1px solid #dee2e6;
+                border-radius: 4px;
+            }
+        """)
+        
+        # 饼图容器
+        pie_container = QWidget()
+        pie_layout = QVBoxLayout(pie_container)
+        pie_layout.setContentsMargins(5, 5, 5, 5)
+        pie_layout.setSpacing(0)
+        
+        self.color_pie_chart_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        pie_layout.addWidget(self.color_pie_chart_label)
+        pie_container.setLayout(pie_layout)
+        
+        # 设置饼图容器样式
+        pie_container.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                border: 1px solid #dee2e6;
+                border-radius: 4px;
+            }
+        """)
+        
+        # 添加到分割器
+        splitter.addWidget(table_container)
+        splitter.addWidget(pie_container)
+        
+        # 设置分割器的初始大小比例
+        splitter.setSizes([300, 300])
+        
+        # 设置分割器样式
+        splitter.setStyleSheet("""
+            QSplitter::handle {
+                background-color: #cccccc;
+                height: 2px;
+            }
+            QSplitter::handle:hover {
+                background-color: #999999;
+            }
+            QSplitter {
+                padding: 0px;
+                margin: 0px;
+            }
+        """)
+        
+        # 连接分割器的splitterMoved信号
+        splitter.splitterMoved.connect(self.on_splitter_moved)
+        
+        right_layout.addWidget(splitter)
 
         # 主布局
         main_layout = QHBoxLayout()
@@ -598,11 +674,6 @@ class MainWindow(QMainWindow):
             row = self.find_row_by_mask_id(self.pending_mask_id)
             is_editing = row != -1
 
-            # 计算当前掩码的占比（临时值）
-            current_mask_pixels = np.sum(mask_data)
-            total_mask_pixels = sum(np.sum(m['mask']) for m in self.viewer.masks.values())
-            percentage = current_mask_pixels / total_mask_pixels if total_mask_pixels > 0 else 0.0
-
             if is_editing:
                 # 编辑现有标定：保持原有颜色
                 print(f"[保存] 更新现有标定 {self.pending_mask_id}")
@@ -617,14 +688,14 @@ class MainWindow(QMainWindow):
                     print("[警告] 无法获取颜色信息，使用默认颜色")
                 
                 self.viewer.masks[self.pending_mask_id]['color'] = (r, g, b)
-
+                
                 # 重新计算所有掩码的占比
                 total_pixels = self.viewer.cv_img.shape[0] * self.viewer.cv_img.shape[1]
                 visible_masks = {k: v for k, v in self.viewer.masks.items() if v.get('visible', True)}
-
+                
                 # 计算所有可见掩码的总像素数
                 total_mask_pixels = sum(np.sum(mask['mask']) for mask in visible_masks.values())
-
+                
                 # 更新当前掩码的占比
                 current_mask_pixels = np.sum(mask_data)
                 if total_mask_pixels > 0:
@@ -638,10 +709,7 @@ class MainWindow(QMainWindow):
                 
                 # 更新行显示
                 self.update_annotation_row(row, color_info, self.pending_mask_id)
-
-                # 强制更新所有行的占比
-                self.update_percentage_in_table()
-
+                
             else:
                 # 新增标定：提取新的颜色
                 print("[保存] 创建新标定")
@@ -733,24 +801,7 @@ class MainWindow(QMainWindow):
         
         color_label.clicked.connect(lambda: self.show_color_dialog(row))
         self.annotation_table.setCellWidget(row, 1, color_container)
-
-        # 计算当前行的占比（临时值）
-        if mask_id in self.viewer.masks:
-            mask_pixels = np.sum(self.viewer.masks[mask_id]['mask'])
-            total_mask_pixels = sum(np.sum(m['mask']) for m in self.viewer.masks.values())
-            percentage = mask_pixels / total_mask_pixels if total_mask_pixels > 0 else 0.0
-        else:
-            percentage = 0.0
-
-        # 设置当前行的占比（后续会被全局更新覆盖，但避免显示空白）
-        percentage_item = QTableWidgetItem(f"{percentage:.1%}")
-        percentage_item.setFlags(percentage_item.flags() & ~Qt.ItemIsEditable)
-        percentage_item.setTextAlignment(Qt.AlignCenter)
-        self.annotation_table.setItem(row, 2, percentage_item)
-
-        # 强制更新所有行的占比
-        self.update_percentage_in_table()
-
+            
         # 占比列（不可编辑）
         percentage_item = QTableWidgetItem(f"{percentage:.1%}")
         percentage_item.setFlags(percentage_item.flags() & ~Qt.ItemIsEditable)
@@ -768,7 +819,8 @@ class MainWindow(QMainWindow):
                 background-color: transparent;
                 color: #28a745;
                 font-family: "Segoe UI Symbol";
-                font-size: 24px;
+                font-size: 20px;
+                font-weight: bold;
                 padding: 0px;
             }
             QPushButton:checked {
@@ -779,7 +831,7 @@ class MainWindow(QMainWindow):
                 border-radius: 4px;
             }
         """)
-        visibility_btn.setText("●")  # 使用实心圆点表示可见
+        visibility_btn.setText("✓")  # 使用对钩表示可见
         visibility_btn.clicked.connect(lambda checked: self.toggle_mask_visibility(row, checked))
         
         visibility_widget = QWidget()
@@ -844,29 +896,27 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
-
+        
         if reply == QMessageBox.Yes:
             try:
                 # 从masks字典中删除
                 if mask_id in self.viewer.masks:
                     del self.viewer.masks[mask_id]
-
+                
                 # 从表格中删除行
                 self.annotation_table.removeRow(row)
-
+                
                 # 更新剩余行的编号
                 for i in range(self.annotation_table.rowCount()):
                     id_item = self.annotation_table.item(i, 0)
                     if id_item:
                         id_item.setText(str(i + 1))
-
-                self.update_percentage_in_table()
-
+                
                 # 清理相关状态
                 if self.viewer.pending_mask_id == mask_id:
                     self.viewer.pending_mask_id = None
                     self.viewer.mask = None
-
+                
                 # 如果删除后没有任何标注，清空饼图
                 if self.annotation_table.rowCount() == 0:
                     self.color_pie_chart_label.clear()
@@ -877,10 +927,10 @@ class MainWindow(QMainWindow):
                     # 刷新显示
                     self.update_annotation_preview()
                     self.update_color_pie_chart()
-
+                
                 # 刷新视图
                 self.viewer.repaint()
-
+                
                 print(f"[删除] 掩码 {mask_id} 已删除")
             except Exception as e:
                 print(f"[错误] 删除失败: {e}")
@@ -974,17 +1024,53 @@ class MainWindow(QMainWindow):
             self.annotation_preview_label.setText("预览更新失败")
 
     def update_color_pie_chart(self):
-        """更新颜色饼图，显示所有已保存的标定的比例"""
+        """触发饼图更新（带节流控制）"""
+        current_time = time.time() * 1000
+        if current_time - self.last_pie_update > 100:
+            self.last_pie_update = current_time
+            self.pie_update_timer.stop()
+            self.pie_update_timer.start(50)
+
+    def do_update_color_pie_chart(self):
+        """实际执行饼图更新的方法"""
         if self.viewer.cv_img is None:
             self.color_pie_chart_label.setText("无图片")
             return
 
-        # 从masks字典中计算所有掩码的像素总数（不考虑可见性）
-        total_pixels = self.viewer.cv_img.shape[0] * self.viewer.cv_img.shape[1]  # 图像总像素
+        try:
+            # 获取当前标签大小
+            current_size = self.color_pie_chart_label.size()
+            
+            # 如果没有标注数据，直接返回
+            if self.annotation_table.rowCount() == 0:
+                self.color_pie_chart_label.setText("无标定数据")
+                return
+
+            # 计算掩码数据
+            mask_data = self.calculate_mask_data()
+            if not mask_data:
+                self.color_pie_chart_label.setText("无标定数据")
+                return
+
+            # 创建饼图
+            pixmap = self.create_pie_chart(mask_data, current_size)
+            if pixmap:
+                self.color_pie_chart_label.setPixmap(pixmap)
+                self.color_pie_chart_label.setAlignment(Qt.AlignCenter)
+            
+        except Exception as e:
+            print(f"[错误] 生成饼图时出错: {e}")
+            import traceback
+            print(traceback.format_exc())
+            self.color_pie_chart_label.setText("饼图生成失败")
+
+    def calculate_mask_data(self):
+        """计算掩码数据"""
+        total_pixels = self.viewer.cv_img.shape[0] * self.viewer.cv_img.shape[1]
         colors_data = []
         mask_pixels = {}
 
-        # 计算每个掩码的像素数量和对应颜色（包括不可见的掩码）
+        # 计算每个掩码的像素数量和对应颜色
         for row in range(self.annotation_table.rowCount()):
             id_item = self.annotation_table.item(row, 0)
             if id_item:
@@ -992,128 +1078,104 @@ class MainWindow(QMainWindow):
                 if mask_id and mask_id in self.viewer.masks:
                     mask_data = self.viewer.masks[mask_id]
                     mask = mask_data.get('mask')
-                    mask_pixel_count = np.sum(mask)  # 掩码中的像素数
-
-                    # 从ID项获取RGB值
+                    if mask is None:
+                        continue
+                        
+                    mask_pixel_count = np.sum(mask)
                     r, g, b = id_item.data(Qt.UserRole + 1)
-
-                    # 保存掩码数据
+                    
                     mask_pixels[mask_id] = {
                         'count': mask_pixel_count,
                         'rgb': (r, g, b)
                     }
 
-        # 计算所有掩码的总像素数
-        total_mask_pixels = sum(data['count'] for data in mask_pixels.values())
-
-        if total_mask_pixels == 0:
-            self.color_pie_chart_label.setText("无标定数据")
-            return
-
-        # 计算每个掩码的占比（基于总掩码像素）
+        # 计算百分比
         for mask_id, data in mask_pixels.items():
-            percentage = data['count'] / total_pixels  # 使用图像总像素计算真实占比
+            percentage = data['count'] / total_pixels
             colors_data.append({
                 'rgb': data['rgb'],
                 'percentage': percentage
             })
-            
-        # 设置matplotlib字体
-        plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei'] + plt.rcParams['font.sans-serif']
-        plt.rcParams['axes.unicode_minus'] = False
 
-        plt.clf()
-        fig, ax = plt.subplots(figsize=(10, 10))
+        return colors_data if colors_data else None
 
-        # 准备数据
-        sizes = [data['percentage'] for data in colors_data]
-        colors = [f"#{r:02x}{g:02x}{b:02x}" for data in colors_data for r, g, b in [data['rgb']]]
-
-        # 绘制饼图 - 修复返回值解包问题
-        patches = ax.pie(
-            sizes,
-            colors=colors,
-            labels=[''] * len(colors),
-            autopct='%1.1f%%',  # 显示百分比
-            startangle=90
-        )
-        
-        # 正确获取wedges
-        wedges = patches[0]  # patches[0]是饼图的切片列表
-
-        # 添加图例
-        legend_labels = [f'{data["percentage"]:.1%}' for data in colors_data]
-        legend = ax.legend(
-            wedges,
-            legend_labels,
-            title="颜色占比",
-            loc="center left",
-            bbox_to_anchor=(1, 0, 0.5, 1),
-            fontsize=14,
-            title_fontsize=16
-        )
-
-        # 调整图例样式
-        legend.get_frame().set_linewidth(2)
-        legend.get_frame().set_edgecolor('black')
-
-        ax.axis('equal')
-
-        # 保存图片
+    def create_pie_chart(self, colors_data, size):
+        """创建饼图"""
         try:
+            # 设置matplotlib字体
+            plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei'] + plt.rcParams['font.sans-serif']
+            plt.rcParams['axes.unicode_minus'] = False
+
+            plt.clf()
+            
+            # 计算图表大小
+            dpi = 100
+            fig_width = size.width() / dpi
+            fig_height = size.height() / dpi
+            
+            # 创建图形
+            fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)
+
+            # 准备数据
+            sizes = [data['percentage'] for data in colors_data]
+            colors = [f"#{r:02x}{g:02x}{b:02x}" for data in colors_data for r, g, b in [data['rgb']]]
+
+            # 绘制饼图
+            patches = ax.pie(
+                sizes,
+                colors=colors,
+                labels=[''] * len(colors),
+                autopct='%1.1f%%',
+                startangle=90
+            )
+            
+            # 添加图例
+            wedges = patches[0]
+            legend_labels = [f'{data["percentage"]:.1%}' for data in colors_data]
+            legend = ax.legend(
+                wedges,
+                legend_labels,
+                title="颜色占比",
+                loc="center left",
+                bbox_to_anchor=(1, 0, 0.5, 1),
+                fontsize=max(8, min(14, int(fig_width * 2))),
+                title_fontsize=max(10, min(16, int(fig_width * 2.5)))
+            )
+
+            legend.get_frame().set_linewidth(2)
+            legend.get_frame().set_edgecolor('black')
+            ax.axis('equal')
+
+            # 保存图片
             buf = BytesIO()
-            plt.savefig(buf, format='png', bbox_inches='tight', dpi=100, pad_inches=0.3)
+            plt.savefig(buf, format='png', bbox_inches='tight', dpi=dpi, pad_inches=0.1)
             buf.seek(0)
             plt.close(fig)
 
-            # 显示图片
+            # 创建pixmap
             img = QImage.fromData(buf.read())
             pixmap = QPixmap.fromImage(img)
-            scaled_pixmap = pixmap.scaled(
-                self.color_pie_chart_label.size(),
+            return pixmap.scaled(
+                size,
                 Qt.KeepAspectRatio,
                 Qt.SmoothTransformation
             )
-            self.color_pie_chart_label.setPixmap(scaled_pixmap)
-            self.color_pie_chart_label.setAlignment(Qt.AlignCenter)
+            
         except Exception as e:
-            print(f"[错误] 生成饼图时出错: {e}")
-            import traceback
-            print(traceback.format_exc())
-            self.color_pie_chart_label.setText("饼图生成失败")
+            print(f"[错误] 创建饼图时出错: {str(e)}")
+            return None
 
-    def update_percentage_in_table(self):
-        """更新表格中的占比列（基于所有掩码像素总和）"""
-        # 计算所有掩码的总像素
-        total_mask_pixels = 0
-        mask_pixel_counts = {}  # {mask_id: pixel_count}
-
-        # 先遍历所有掩码，计算总像素（只统计仍然存在的掩码）
+    def update_percentage_in_table(self, mask_pixels, total_mask_pixels):
+        """更新表格中的占比数据"""
         for row in range(self.annotation_table.rowCount()):
             id_item = self.annotation_table.item(row, 0)
             if id_item:
                 mask_id = id_item.data(Qt.UserRole)
-                if mask_id and mask_id in self.viewer.masks:  # 确保掩码仍然存在
-                    mask = self.viewer.masks[mask_id]['mask']
-                    mask_pixels = np.sum(mask)
-                    mask_pixel_counts[mask_id] = mask_pixels
-                    total_mask_pixels += mask_pixels
-
-        if total_mask_pixels == 0:
-            # 如果没有掩码，将所有行的占比设为0%
-            for row in range(self.annotation_table.rowCount()):
-                percentage_item = self.annotation_table.item(row, 2)
-                if percentage_item:
-                    percentage_item.setText("0.0%")
-            return
-
-        # 更新表格中的占比
-        for row in range(self.annotation_table.rowCount()):
-            id_item = self.annotation_table.item(row, 0)
-            if id_item:
-                mask_id = id_item.data(Qt.UserRole)
-                if mask_id in mask_pixel_counts:
-                    percentage = mask_pixel_counts[mask_id] / total_mask_pixels
+                if mask_id in mask_pixels:
+                    # 计算百分比
+                    percentage = mask_pixels[mask_id]['count'] / total_mask_pixels
+                    
+                    # 更新表格中的占比显示
                     percentage_item = self.annotation_table.item(row, 2)
                     if percentage_item:
                         percentage_item.setText(f"{percentage:.1%}")
@@ -1122,12 +1184,6 @@ class MainWindow(QMainWindow):
                         percentage_item.setFlags(percentage_item.flags() & ~Qt.ItemIsEditable)
                         percentage_item.setTextAlignment(Qt.AlignCenter)
                         self.annotation_table.setItem(row, 2, percentage_item)
-
-                else:
-                    # 如果掩码已被删除，但表格行仍存在（比如还没刷新），设为0%
-                    percentage_item = self.annotation_table.item(row, 2)
-                    if percentage_item:
-                        percentage_item.setText("0.0%")
 
     def toggle_mask_visibility(self, row, checked):
         """切换掩码可见性"""
@@ -1173,23 +1229,20 @@ class MainWindow(QMainWindow):
 
             # 更新按钮状态和掩码可见性
             if checked:
-                visibility_btn.setText("●")  # 实心圆点表示可见
+                visibility_btn.setText("✓")  # 对钩表示可见
                 self.viewer.set_mask_visibility(mask_id, True, (r, g, b))
             else:
-                visibility_btn.setText("○")  # 空心圆圈表示不可见
+                visibility_btn.setText("✗")  # 叉号表示不可见
                 self.viewer.set_mask_visibility(mask_id, False)
 
             # 更新预览
             self.update_annotation_preview()
             self.update_color_pie_chart()
-            self.update_percentage_in_table()
-
 
         except Exception as e:
             print(f"[错误] 切换掩码可见性失败: {str(e)}")
             import traceback
             print(traceback.format_exc())
-
 
     def edit_annotation(self, row, mask_id):
         print(f"[编辑] 开始编辑掩码 {mask_id}")
@@ -1271,7 +1324,7 @@ class MainWindow(QMainWindow):
                             visible = entry.get("visible", True)
                             self.viewer.set_mask_visibility(mask_id, visible)
 
-                            # 找到对应行，设置显示列为 ✔ / ✖
+                            # 找到对应行，设置显示列为 ✓ / ✗
                             row = self.find_row_by_mask_id(mask_id)
                             if row != -1:
                                 visibility_widget = self.annotation_table.cellWidget(row, 3)
@@ -1279,7 +1332,7 @@ class MainWindow(QMainWindow):
                                     visibility_btn = visibility_widget.findChild(QPushButton)
                                     if visibility_btn:
                                         visibility_btn.setChecked(visible)
-                                        visibility_btn.setText("●" if visible else "○")
+                                        visibility_btn.setText("✓" if visible else "✗")
 
                         except Exception as e:
                             print(f"[警告] 处理掩码 {mask_id} 时出错: {str(e)}")
@@ -1288,7 +1341,6 @@ class MainWindow(QMainWindow):
                     # 更新预览
                     self.update_annotation_preview()
                     self.update_color_pie_chart()
-                    self.update_percentage_in_table()
                 else:
                     # 清空显示
                     self.annotation_table.setRowCount(0)
@@ -1474,7 +1526,6 @@ class MainWindow(QMainWindow):
                 
                 # 更新颜色饼图
                 self.update_color_pie_chart()
-                self.update_percentage_in_table()
         except Exception as e:
             QMessageBox.warning(self, "错误", f"修改颜色时出错：{str(e)}")
 
@@ -1684,7 +1735,6 @@ class MainWindow(QMainWindow):
             print("[更新] 刷新预览...")
             self.update_annotation_preview()
             self.update_color_pie_chart()
-            self.update_percentage_in_table()
             print("[完成] 分割结果处理完成")
             
         except Exception as e:
@@ -2010,6 +2060,47 @@ class MainWindow(QMainWindow):
             print(traceback.format_exc())
             QMessageBox.critical(self, "错误", f"恢复历史状态时出错：{str(e)}")
 
+    def on_splitter_moved(self, pos, index):
+        """处理分割器移动事件"""
+        try:
+            # 获取表格的行数
+            row_count = self.annotation_table.rowCount()
+            if row_count == 0:
+                return
+                
+            # 计算表格所需的最小高度
+            header_height = self.annotation_table.horizontalHeader().height()
+            min_height = header_height + (row_count * 50)  # 每行50像素
+            
+            # 获取当前表格容器的高度
+            table_container = self.annotation_table.parent()
+            current_height = table_container.height()
+            
+            # 如果当前高度小于最小所需高度，调整回最小高度
+            if current_height < min_height:
+                splitter = table_container.parent()
+                if isinstance(splitter, QSplitter):
+                    sizes = splitter.sizes()
+                    sizes[0] = min_height
+                    sizes[1] = splitter.height() - min_height - splitter.handleWidth()
+                    splitter.setSizes(sizes)
+            
+            # 设置每行的固定高度
+            for row in range(row_count):
+                self.annotation_table.setRowHeight(row, 50)
+            
+            # 使用节流机制更新饼图
+            current_time = time.time() * 1000
+            if current_time - self.last_pie_update > 100:
+                self.last_pie_update = current_time
+                self.pie_update_timer.stop()
+                self.pie_update_timer.start(50)
+                
+        except Exception as e:
+            print(f"[错误] 处理分割器移动时出错: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+
 # 添加可点击的颜色标签类
 class ClickableColorLabel(QLabel):
     clicked = pyqtSignal()
@@ -2021,3 +2112,4 @@ class ClickableColorLabel(QLabel):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
+

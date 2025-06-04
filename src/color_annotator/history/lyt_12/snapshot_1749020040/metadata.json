@@ -1,0 +1,38 @@
+{
+  "id": "snapshot_1749020040",
+  "timestamp": 1749020040,
+  "date": "2025-06-04 14:54:00",
+  "description": "标定保存于 2025-06-04 14:54:00",
+  "masks": [
+    {
+      "id": "mask_0",
+      "color": [
+        79,
+        139,
+        178
+      ],
+      "visible": true,
+      "mask_file": "mask_0.png"
+    },
+    {
+      "id": "mask_1",
+      "color": [
+        29,
+        26,
+        25
+      ],
+      "visible": true,
+      "mask_file": "mask_1.png"
+    },
+    {
+      "id": "mask_2",
+      "color": [
+        81,
+        141,
+        180
+      ],
+      "visible": true,
+      "mask_file": "mask_2.png"
+    }
+  ]
+}

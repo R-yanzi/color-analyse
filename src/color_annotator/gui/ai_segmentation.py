@@ -898,8 +898,9 @@ class AISegmentationWidget(QWidget):
                     border: none;
                     background-color: transparent;
                     color: #28a745;
-                    font-family: \"Segoe UI Symbol\";
-                    font-size: 24px;
+                    font-family: "Segoe UI Symbol";
+                    font-size: 20px;
+                    font-weight: bold;
                     padding: 0px;
                 }
                 QPushButton:checked {
@@ -910,7 +911,7 @@ class AISegmentationWidget(QWidget):
                     border-radius: 4px;
                 }
             """)
-            visibility_btn.setText("●")
+            visibility_btn.setText("✓")  # 使用对钩表示可见
             # 使用lambda捕获当前的mask_id
             visibility_btn.clicked.connect(lambda checked, mid=mask_id, r=row: main_window.toggle_mask_visibility(r, checked))
             
