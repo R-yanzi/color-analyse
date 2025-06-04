@@ -19,6 +19,7 @@ from pathlib import Path
 import time
 from PyQt5.QtGui import QKeySequence
 from .history_dialog import HistoryDialog
+from datetime import datetime
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -484,6 +485,98 @@ class MainWindow(QMainWindow):
             import traceback
             print(traceback.format_exc())
 
+    def save_annotations_to_json(self):
+        """保存标注数据到JSON文件"""
+        if self.viewer.cv_img is None:
+            QMessageBox.warning(self, "未加载图像", "请先打开一张图片。")
+            return
+
+        try:
+            # 检查图像路径
+            if not hasattr(self.viewer, 'image_path') or not self.viewer.image_path:
+                QMessageBox.warning(self, "保存失败", "无法确定图像路径。")
+                return
+
+            # 创建保存路径
+            base_name = os.path.splitext(os.path.basename(self.viewer.image_path))[0]
+            save_path = os.path.join("annotations", base_name + ".json")
+            os.makedirs("annotations", exist_ok=True)
+
+            # 获取相对路径
+            abs_img_path = self.viewer.image_path
+            proj_root = os.path.abspath(os.getcwd())
+            rel_img_path = os.path.relpath(abs_img_path, proj_root)
+
+            # 准备数据
+            annotations = []
+            for mask_id, entry in self.viewer.masks.items():
+                try:
+                    if entry is None or 'mask' not in entry:
+                        print(f"[警告] 掩码 {mask_id} 数据无效，跳过")
+                        continue
+
+                    mask_array = entry["mask"]
+                    if mask_array is None or mask_array.size == 0:
+                        print(f"[警告] 掩码 {mask_id} 为空，跳过")
+                        continue
+
+                    mask_array = mask_array.astype(np.int32)
+                    height, width = mask_array.shape
+                    rle = self.encode_rle(mask_array)
+
+                    # 确保颜色值是整数列表
+                    color = entry.get("color", [0, 255, 0])
+                    color = [int(c) for c in color]
+
+                    annotation = {
+                        "rle": [[int(s), int(l)] for s, l in rle],
+                        "size": [int(height), int(width)],
+                        "main_color": color
+                    }
+                    annotations.append(annotation)
+                except Exception as e:
+                    print(f"[警告] 处理掩码 {mask_id} 时出错: {str(e)}")
+                    continue
+
+            # 如果没有有效的标注，提示用户
+            if not annotations:
+                QMessageBox.warning(self, "保存失败", "没有有效的标注数据可保存。")
+                return
+
+            # 保存数据
+            data = {
+                "image_path": rel_img_path.replace("\\", "/"),
+                "annotations": annotations
+            }
+
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            # 创建历史快照
+            if not hasattr(self, 'history_manager'):
+                from src.color_annotator.utils.history_manager import HistoryManager
+                self.history_manager = HistoryManager()
+            
+            # 设置当前图像
+            self.history_manager.set_current_image(self.viewer.image_path)
+            
+            # 保存快照
+            snapshot_id = self.history_manager.save_snapshot(
+                self.viewer.masks,
+                description=f"保存于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            
+            if snapshot_id:
+                print(f"[历史记录] 创建快照: {snapshot_id}")
+
+            self.has_unsaved_changes = False  # 重置未保存標記
+            QMessageBox.information(self, "保存成功", f"标定数据已保存至：\n{save_path}")
+            
+        except Exception as e:
+            error_msg = f"保存失败: {str(e)}"
+            print(f"[错误] {error_msg}")
+            QMessageBox.critical(self, "保存失败", error_msg)
+
     def save_annotation(self):
         """保存当前标定"""
         try:
@@ -569,6 +662,23 @@ class MainWindow(QMainWindow):
             # 更新显示
             self.update_annotation_preview()
             self.update_color_pie_chart()
+            
+            # 创建历史快照
+            if not hasattr(self, 'history_manager'):
+                from src.color_annotator.utils.history_manager import HistoryManager
+                self.history_manager = HistoryManager()
+            
+            # 设置当前图像
+            self.history_manager.set_current_image(self.viewer.image_path)
+            
+            # 保存快照
+            snapshot_id = self.history_manager.save_snapshot(
+                self.viewer.masks,
+                description=f"标定保存于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            
+            if snapshot_id:
+                print(f"[历史记录] 创建快照: {snapshot_id}")
             
             print("[完成] 当前标定保存成功")
             
@@ -1031,81 +1141,6 @@ class MainWindow(QMainWindow):
             self.viewer.pending_mask_id = mask_id
             self.viewer.mask = self.viewer.masks[mask_id]['mask']
             self.viewer.update()
-
-    def save_annotations_to_json(self):
-        """保存标注数据到JSON文件"""
-        if self.viewer.cv_img is None:
-            QMessageBox.warning(self, "未加载图像", "请先打开一张图片。")
-            return
-
-        try:
-            # 检查图像路径
-            if not hasattr(self.viewer, 'image_path') or not self.viewer.image_path:
-                QMessageBox.warning(self, "保存失败", "无法确定图像路径。")
-                return
-
-            # 创建保存路径
-            base_name = os.path.splitext(os.path.basename(self.viewer.image_path))[0]
-            save_path = os.path.join("annotations", base_name + ".json")
-            os.makedirs("annotations", exist_ok=True)
-
-            # 获取相对路径
-            abs_img_path = self.viewer.image_path
-            proj_root = os.path.abspath(os.getcwd())
-            rel_img_path = os.path.relpath(abs_img_path, proj_root)
-
-            # 准备数据
-            annotations = []
-            for mask_id, entry in self.viewer.masks.items():
-                try:
-                    if entry is None or 'mask' not in entry:
-                        print(f"[警告] 掩码 {mask_id} 数据无效，跳过")
-                        continue
-
-                    mask_array = entry["mask"]
-                    if mask_array is None or mask_array.size == 0:
-                        print(f"[警告] 掩码 {mask_id} 为空，跳过")
-                        continue
-
-                    mask_array = mask_array.astype(np.int32)
-                    height, width = mask_array.shape
-                    rle = self.encode_rle(mask_array)
-
-                    # 确保颜色值是整数列表
-                    color = entry.get("color", [0, 255, 0])
-                    color = [int(c) for c in color]
-
-                    annotation = {
-                        "rle": [[int(s), int(l)] for s, l in rle],
-                        "size": [int(height), int(width)],
-                        "main_color": color
-                    }
-                    annotations.append(annotation)
-                except Exception as e:
-                    print(f"[警告] 处理掩码 {mask_id} 时出错: {str(e)}")
-                    continue
-
-            # 如果没有有效的标注，提示用户
-            if not annotations:
-                QMessageBox.warning(self, "保存失败", "没有有效的标注数据可保存。")
-                return
-
-            # 保存数据
-            data = {
-                "image_path": rel_img_path.replace("\\", "/"),
-                "annotations": annotations
-            }
-
-            with open(save_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-
-            self.has_unsaved_changes = False  # 重置未保存標記
-            QMessageBox.information(self, "保存成功", f"标定数据已保存至：\n{save_path}")
-            
-        except Exception as e:
-            error_msg = f"保存失败: {str(e)}"
-            print(f"[错误] {error_msg}")
-            QMessageBox.critical(self, "保存失败", error_msg)
 
     def open_image(self):
         # 获取当前文件所在目录
@@ -1858,11 +1893,15 @@ class MainWindow(QMainWindow):
     def restore_history_snapshot(self, snapshot_id):
         """恢复到指定的历史快照"""
         try:
+            print(f"[历史记录] 开始恢复快照: {snapshot_id}")
+            
             # 恢复掩码数据
             restored_masks = self.history_manager.restore_snapshot(snapshot_id)
             if not restored_masks:
                 QMessageBox.warning(self, "恢复失败", "无法恢复选定的历史状态")
                 return
+                
+            print(f"[历史记录] 成功加载快照数据，包含 {len(restored_masks)} 个掩码")
                 
             # 更新viewer的掩码
             self.viewer.masks = restored_masks
@@ -1887,6 +1926,7 @@ class MainWindow(QMainWindow):
                     
                     # 添加到表格
                     self.add_annotation_to_table(color_info, mask_id)
+                    print(f"[历史记录] 恢复掩码 {mask_id}, 颜色: {color_info.rgb}")
                     
                 except Exception as e:
                     print(f"[警告] 恢复掩码 {mask_id} 到表格时出错: {str(e)}")
@@ -1898,6 +1938,9 @@ class MainWindow(QMainWindow):
             
             # 重置未保存标记
             self.has_unsaved_changes = False
+            
+            print("[历史记录] 快照恢复完成")
+            QMessageBox.information(self, "恢复成功", "已成功恢复到选定的历史状态")
             
         except Exception as e:
             print(f"[错误] 恢复历史状态时出错: {str(e)}")

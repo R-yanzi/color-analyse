@@ -24,22 +24,56 @@ class HistoryDialog(QDialog):
         self.resize(800, 600)
         
         # 创建布局
-        main_layout = QHBoxLayout(self)
+        main_layout = QVBoxLayout(self)  # 改为垂直布局
+        
+        # 创建水平分割器
+        splitter = QSplitter(Qt.Horizontal)
         
         # 左侧历史列表
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
+        list_label = QLabel("历史记录列表:")
+        list_label.setStyleSheet("""
+            font-size: 14px;
+            font-weight: bold;
+            padding: 5px;
+        """)
         
         self.history_list = QListWidget()
         self.history_list.setMinimumWidth(300)
         self.history_list.currentItemChanged.connect(self.on_history_item_selected)
+        self.history_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                padding: 5px;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #eee;
+            }
+            QListWidget::item:selected {
+                background-color: #e3f2fd;
+                color: #1976d2;
+            }
+        """)
         
-        left_layout.addWidget(QLabel("历史记录列表:"))
+        left_layout.addWidget(list_label)
         left_layout.addWidget(self.history_list)
         
         # 右侧预览区域
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        
+        preview_label = QLabel("预览:")
+        preview_label.setStyleSheet("""
+            font-size: 14px;
+            font-weight: bold;
+            padding: 5px;
+        """)
         
         self.preview_scroll = QScrollArea()
         self.preview_scroll.setWidgetResizable(True)
@@ -49,53 +83,97 @@ class HistoryDialog(QDialog):
         
         self.info_label = QLabel("选择左侧历史记录查看详情")
         self.info_label.setAlignment(Qt.AlignCenter)
-        self.info_label.setStyleSheet("font-size: 14px; color: #666;")
+        self.info_label.setStyleSheet("""
+            font-size: 14px;
+            color: #666;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+        """)
         
         self.preview_image = QLabel()
         self.preview_image.setAlignment(Qt.AlignCenter)
-        self.preview_image.setMinimumSize(300, 300)
-        self.preview_image.setStyleSheet("border: 1px solid #ccc;")
+        self.preview_image.setMinimumSize(400, 400)
+        self.preview_image.setStyleSheet("""
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 5px;
+            background-color: white;
+        """)
         
         self.preview_layout.addWidget(self.info_label)
         self.preview_layout.addWidget(self.preview_image)
         self.preview_layout.addStretch()
         
-        right_layout.addWidget(QLabel("预览:"))
+        right_layout.addWidget(preview_label)
         right_layout.addWidget(self.preview_scroll)
         
-        # 底部按钮
-        button_layout = QHBoxLayout()
-        
-        self.restore_btn = QPushButton("恢复到此状态")
-        self.restore_btn.setEnabled(False)
-        self.restore_btn.clicked.connect(self.restore_selected)
-        
-        self.cancel_btn = QPushButton("取消")
-        self.cancel_btn.clicked.connect(self.reject)
-        
-        button_layout.addStretch()
-        button_layout.addWidget(self.restore_btn)
-        button_layout.addWidget(self.cancel_btn)
-        
-        # 添加到主布局
-        splitter = QSplitter(Qt.Horizontal)
+        # 添加面板到分割器
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
         splitter.setSizes([300, 500])
         
+        # 添加分割器到主布局
         main_layout.addWidget(splitter)
         
-        # 添加底部按钮
-        bottom_layout = QVBoxLayout()
-        bottom_layout.addWidget(self.create_separator())
-        bottom_layout.addLayout(button_layout)
+        # 底部按钮区域
+        button_container = QWidget()
+        button_layout = QHBoxLayout(button_container)
+        button_layout.setContentsMargins(10, 10, 10, 10)
         
-        # 组合布局
-        container_layout = QVBoxLayout()
-        container_layout.addWidget(splitter)
-        container_layout.addLayout(bottom_layout)
+        self.restore_btn = QPushButton("恢复到此状态")
+        self.restore_btn.setEnabled(False)
+        self.restore_btn.clicked.connect(self.restore_selected)
+        self.restore_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-size: 14px;
+                min-width: 120px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+            QPushButton:disabled {
+                background-color: #6c757d;
+                opacity: 0.65;
+            }
+        """)
         
-        self.setLayout(container_layout)
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.reject)
+        self.cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-size: 14px;
+                min-width: 120px;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
+        """)
+        
+        button_layout.addStretch()
+        button_layout.addWidget(self.restore_btn)
+        button_layout.addWidget(self.cancel_btn)
+        button_layout.addStretch()
+        
+        # 添加分隔线
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        separator.setStyleSheet("background-color: #dee2e6;")
+        
+        # 添加底部组件到主布局
+        main_layout.addWidget(separator)
+        main_layout.addWidget(button_container)
         
         # 加载历史记录
         self.load_history_list()
@@ -116,7 +194,7 @@ class HistoryDialog(QDialog):
             date_str = entry.get("date", "未知时间")
             description = entry.get("description", "标定快照")
             
-            item = QListWidgetItem(f"{date_str} - {description}")
+            item = QListWidgetItem(f"{date_str}\n{description}")
             item.setData(Qt.UserRole, entry.get("id"))
             self.history_list.addItem(item)
             
@@ -230,11 +308,4 @@ class HistoryDialog(QDialog):
         
         if reply == QMessageBox.Yes:
             self.historySelected.emit(self.selected_snapshot_id)
-            self.accept()
-            
-    def create_separator(self):
-        """创建分隔线"""
-        separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        return separator 
+            self.accept() 
