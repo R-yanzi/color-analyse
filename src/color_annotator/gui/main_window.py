@@ -20,6 +20,7 @@ import time
 from PyQt5.QtGui import QKeySequence
 
 
+# 666
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
