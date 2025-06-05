@@ -20,7 +20,7 @@ import time
 from PyQt5.QtGui import QKeySequence
 from .history_dialog import HistoryDialog
 from datetime import datetime
-
+# ye
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
