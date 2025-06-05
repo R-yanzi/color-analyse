@@ -380,13 +380,20 @@ class MainWindow(QMainWindow):
         table_layout.setSpacing(0)
         
         # 设置表格样式和策略
-        self.annotation_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.annotation_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.annotation_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.annotation_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.annotation_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         
         # 设置表格的行高
         self.annotation_table.verticalHeader().setDefaultSectionSize(50)
         self.annotation_table.verticalHeader().setMinimumSectionSize(50)
+        
+        # 计算固定高度 - 显示5行的高度
+        row_height = 50
+        header_height = 30  # 预估的表头高度
+        max_visible_rows = 5
+        fixed_height = header_height + (row_height * max_visible_rows)
+        self.annotation_table.setFixedHeight(fixed_height)
         
         # 允许表格自动调整大小以适应内容
         self.annotation_table.setSizeAdjustPolicy(QTableWidget.AdjustToContents)
@@ -922,20 +929,11 @@ class MainWindow(QMainWindow):
         self.annotation_table.setCellWidget(row, 4, op_widget)
 
         # 设置行高
-        self.annotation_table.setRowHeight(row, 50)  # 增加行高
+        self.annotation_table.setRowHeight(row, 50)
 
-        # 更新表格高度
-        header_height = self.annotation_table.horizontalHeader().height()
-        total_height = header_height + (self.annotation_table.rowCount() * 50)
-        self.annotation_table.setMinimumHeight(total_height)
-        
-        # 调整分割器大小
-        splitter = self.annotation_table.parent().parent()
-        if isinstance(splitter, QSplitter):
-            sizes = splitter.sizes()
-            sizes[0] = total_height
-            sizes[1] = max(300, splitter.height() - total_height - splitter.handleWidth())
-            splitter.setSizes(sizes)
+        # 不再需要动态调整表格高度，因为已设置为固定高度
+        # 只需确保滚动到最新添加的行
+        self.annotation_table.scrollToItem(id_item)
 
     def delete_annotation(self, mask_id, row):
         """删除标注"""
@@ -975,6 +973,10 @@ class MainWindow(QMainWindow):
                 # 更新预览和饼图
                 self.update_annotation_preview()
                 self.update_color_pie_chart()
+                
+                # 设置未保存标记
+                self.has_unsaved_changes = True
+                print("[状态] 删除标定后设置未保存标记")
             except Exception as e:
                 print(f"[错误] 删除失败: {e}")
                 QMessageBox.warning(self, "删除失败", f"删除操作出现错误：{str(e)}")
@@ -2135,21 +2137,7 @@ class MainWindow(QMainWindow):
     def on_splitter_moved(self, pos, index):
         """处理分割器移动事件"""
         try:
-            # 获取表格的行数
-            row_count = self.annotation_table.rowCount()
-            if row_count == 0:
-                return
-                
-            # 计算表格所需的最小高度
-            header_height = self.annotation_table.horizontalHeader().height()
-            total_height = header_height + (row_count * 50)  # 每行50像素
-            
-            # 设置表格的最小高度
-            self.annotation_table.setMinimumHeight(total_height)
-            
-            # 设置每行的固定高度
-            for row in range(row_count):
-                self.annotation_table.setRowHeight(row, 50)
+            # 不再需要动态调整表格高度，因为表格高度已固定
             
             # 使用节流机制更新饼图
             current_time = time.time() * 1000
