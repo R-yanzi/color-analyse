@@ -1,0 +1,68 @@
+{
+  "id": "snapshot_1749127493",
+  "timestamp": 1749127493,
+  "date": "2025-06-05 20:44:53",
+  "description": "标定保存于 2025-06-05 20:44:53",
+  "masks": [
+    {
+      "id": "mask_0",
+      "color": [
+        41,
+        39,
+        37
+      ],
+      "visible": true,
+      "mask_file": "mask_0.png"
+    },
+    {
+      "id": "mask_1",
+      "color": [
+        194,
+        123,
+        78
+      ],
+      "visible": true,
+      "mask_file": "mask_1.png"
+    },
+    {
+      "id": "mask_2",
+      "color": [
+        38,
+        37,
+        32
+      ],
+      "visible": true,
+      "mask_file": "mask_2.png"
+    },
+    {
+      "id": "mask_3",
+      "color": [
+        66,
+        57,
+        50
+      ],
+      "visible": true,
+      "mask_file": "mask_3.png"
+    },
+    {
+      "id": "mask_4",
+      "color": [
+        82,
+        61,
+        49
+      ],
+      "visible": true,
+      "mask_file": "mask_4.png"
+    },
+    {
+      "id": "mask_5",
+      "color": [
+        49,
+        45,
+        40
+      ],
+      "visible": true,
+      "mask_file": "mask_5.png"
+    }
+  ]
+}
