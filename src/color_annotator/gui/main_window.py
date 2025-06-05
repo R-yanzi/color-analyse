@@ -382,11 +382,14 @@ class MainWindow(QMainWindow):
         # 设置表格样式和策略
         self.annotation_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.annotation_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.annotation_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.annotation_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         
-        # 设置表格的固定行高
+        # 设置表格的行高
         self.annotation_table.verticalHeader().setDefaultSectionSize(50)
         self.annotation_table.verticalHeader().setMinimumSectionSize(50)
+        
+        # 允许表格自动调整大小以适应内容
+        self.annotation_table.setSizeAdjustPolicy(QTableWidget.AdjustToContents)
         
         table_layout.addWidget(self.annotation_table)
         table_container.setLayout(table_layout)
@@ -912,6 +915,19 @@ class MainWindow(QMainWindow):
 
         # 设置行高
         self.annotation_table.setRowHeight(row, 50)  # 增加行高
+
+        # 更新表格高度
+        header_height = self.annotation_table.horizontalHeader().height()
+        total_height = header_height + (self.annotation_table.rowCount() * 50)
+        self.annotation_table.setMinimumHeight(total_height)
+        
+        # 调整分割器大小
+        splitter = self.annotation_table.parent().parent()
+        if isinstance(splitter, QSplitter):
+            sizes = splitter.sizes()
+            sizes[0] = total_height
+            sizes[1] = max(300, splitter.height() - total_height - splitter.handleWidth())
+            splitter.setSizes(sizes)
 
     def delete_annotation(self, mask_id, row):
         """删除标注"""
@@ -2126,20 +2142,10 @@ class MainWindow(QMainWindow):
                 
             # 计算表格所需的最小高度
             header_height = self.annotation_table.horizontalHeader().height()
-            min_height = header_height + (row_count * 50)  # 每行50像素
+            total_height = header_height + (row_count * 50)  # 每行50像素
             
-            # 获取当前表格容器的高度
-            table_container = self.annotation_table.parent()
-            current_height = table_container.height()
-            
-            # 如果当前高度小于最小所需高度，调整回最小高度
-            if current_height < min_height:
-                splitter = table_container.parent()
-                if isinstance(splitter, QSplitter):
-                    sizes = splitter.sizes()
-                    sizes[0] = min_height
-                    sizes[1] = splitter.height() - min_height - splitter.handleWidth()
-                    splitter.setSizes(sizes)
+            # 设置表格的最小高度
+            self.annotation_table.setMinimumHeight(total_height)
             
             # 设置每行的固定高度
             for row in range(row_count):
