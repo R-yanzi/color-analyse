@@ -722,6 +722,14 @@ class MainWindow(QMainWindow):
                 # 强制更新所有行的占比
                 self.update_percentage_in_table()
 
+                # 只在最后进行一次重绘
+                self.viewer.update()
+
+                # 更新预览和饼图
+                self.update_annotation_preview()
+                self.update_color_pie_chart()
+
+
             else:
                 # 新增标定：提取新的颜色
                 print("[保存] 创建新标定")
@@ -961,21 +969,12 @@ class MainWindow(QMainWindow):
                     self.viewer.pending_mask_id = None
                     self.viewer.mask = None
 
-                # 如果删除后没有任何标注，清空饼图
-                if self.annotation_table.rowCount() == 0:
-                    self.color_pie_chart_label.clear()
-                    self.color_pie_chart_label.setText("无标注数据")
-                    self.annotation_preview_label.clear()
-                    self.annotation_preview_label.setText("无标注数据")
-                else:
-                    # 刷新显示
-                    self.update_annotation_preview()
-                    self.update_color_pie_chart()
+                # 只在最后进行一次重绘
+                self.viewer.update()
 
-                # 刷新视图
-                self.viewer.repaint()
-
-                print(f"[删除] 掩码 {mask_id} 已删除")
+                # 更新预览和饼图
+                self.update_annotation_preview()
+                self.update_color_pie_chart()
             except Exception as e:
                 print(f"[错误] 删除失败: {e}")
                 QMessageBox.warning(self, "删除失败", f"删除操作出现错误：{str(e)}")
@@ -1146,17 +1145,18 @@ class MainWindow(QMainWindow):
     def create_pie_chart(self, colors_data, size):
         """创建饼图"""
         try:
-            # 设置matplotlib字体
-            plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei'] + plt.rcParams['font.sans-serif']
+            # 设置matplotlib字体 - 添加中文字体支持
+            plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'Microsoft YaHei'] + plt.rcParams[
+                'font.sans-serif']
             plt.rcParams['axes.unicode_minus'] = False
 
             plt.clf()
-            
+
             # 计算图表大小
             dpi = 100
             fig_width = size.width() / dpi
             fig_height = size.height() / dpi
-            
+
             # 创建图形
             fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)
 
@@ -1172,7 +1172,7 @@ class MainWindow(QMainWindow):
                 autopct='%1.1f%%',
                 startangle=90
             )
-            
+
             # 添加图例
             wedges = patches[0]
             legend_labels = [f'{data["percentage"]:.1%}' for data in colors_data]
@@ -1204,7 +1204,7 @@ class MainWindow(QMainWindow):
                 Qt.KeepAspectRatio,
                 Qt.SmoothTransformation
             )
-            
+
         except Exception as e:
             print(f"[错误] 创建饼图时出错: {str(e)}")
             return None
@@ -1846,33 +1846,33 @@ class MainWindow(QMainWindow):
         """切换增加掩码模式"""
         if self.viewer.mode == "add":
             # 退出增加掩码模式
-            self.viewer.set_add_mode()
-            self.btn_add.setStyleSheet(self.button_style)  # 使用普通样式
+            self.viewer.set_add_mode()  # 移除参数
+            self.btn_add.setStyleSheet(self.button_style)
         else:
             # 进入增加掩码模式
-            self.viewer.set_add_mode()
-            self.btn_add.setStyleSheet(self.active_button_style)  # 使用激活样式
+            self.viewer.set_add_mode()  # 移除参数
+            self.btn_add.setStyleSheet(self.active_button_style)
             # 确保擦除按钮显示为普通样式
-            self.btn_erase.setStyleSheet(self.button_style)  
-        
-        # 强制更新视图
-        self.viewer.update()
-            
+            self.btn_erase.setStyleSheet(self.button_style)
+
+            # 更新指针状态
+        self.viewer.update_mode()
+
     def toggle_erase_mode(self):
         """切换擦除掩码模式"""
         if self.viewer.mode == "erase":
             # 退出擦除掩码模式
-            self.viewer.set_erase_mode()
-            self.btn_erase.setStyleSheet(self.button_style)  # 使用普通样式
+            self.viewer.set_erase_mode()  # 移除参数
+            self.btn_erase.setStyleSheet(self.button_style)
         else:
             # 进入擦除掩码模式
-            self.viewer.set_erase_mode()
-            self.btn_erase.setStyleSheet(self.active_button_style)  # 使用激活样式
+            self.viewer.set_erase_mode()  # 移除参数
+            self.btn_erase.setStyleSheet(self.active_button_style)
             # 确保增加按钮显示为普通样式
             self.btn_add.setStyleSheet(self.button_style)
-            
-        # 强制更新视图
-        self.viewer.update()
+
+        # 更新指针状态
+        self.viewer.update_mode()
 
     def check_magnifier_status(self):
         """定时检查放大镜状态并更新"""

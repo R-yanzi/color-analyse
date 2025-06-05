@@ -1024,6 +1024,36 @@ class ImageViewer(QLabel):
         """获取当前放大镜内容"""
         return self.current_magnifier_pixmap
 
+    def update_mode(self):
+        """更新当前模式状态"""
+        if self.mode == "add":
+            self.setCursor(Qt.CrossCursor)
+        elif self.mode == "erase":
+            self.setCursor(Qt.CrossCursor)  # 或者使用其他适合擦除的指针
+        else:
+            self.setCursor(Qt.ArrowCursor)
+        self.update()
+
+    def set_add_mode(self):
+        """设置增加掩码模式"""
+        self.mode = "add"
+
+    def set_erase_mode(self):
+        """设置擦除掩码模式"""
+        self.mode = "erase"
+
+    def update_mode(self):
+        """更新当前模式状态"""
+        if self.mode == "add":
+            self.setCursor(Qt.CrossCursor)
+        elif self.mode == "erase":
+            self.setCursor(Qt.CrossCursor)  # 或者使用其他适合擦除的指针
+        else:
+            self.setCursor(Qt.ArrowCursor)
+        self.update()
+
+
+
     def update_magnifier(self, pos):
         """更新放大镜预览"""
         try:
