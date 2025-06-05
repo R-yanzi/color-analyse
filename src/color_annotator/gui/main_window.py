@@ -73,10 +73,20 @@ class MainWindow(QMainWindow):
         self.magnifier_timer.timeout.connect(self.check_magnifier_status)
         self.magnifier_timer.start(100)  # 100毫秒检查一次(原为50ms)
 
+        self.fullscreen_shortcut = QShortcut(QKeySequence("F11"), self)
+        self.fullscreen_shortcut.activated.connect(self.toggle_fullscreen)
+
+        self.escape_shortcut = QShortcut(QKeySequence("Esc"), self)
+        self.escape_shortcut.activated.connect(self.exit_fullscreen)
+
         # 控制栏
         open_btn = QPushButton("打开图片 (Ctrl+O)")
         open_btn.clicked.connect(self.open_image)
         open_btn.setShortcut("Ctrl+O")
+
+        zoom_btn = QPushButton("放大图像 (F11)")
+        zoom_btn.clicked.connect(self.toggle_fullscreen)
+        zoom_btn.setShortcut("F11")
         
         reset_btn = QPushButton("重置视图 (R)")
         reset_btn.clicked.connect(self.viewer.reset_view)
@@ -118,6 +128,7 @@ class MainWindow(QMainWindow):
         control_bar.addWidget(save_btn)
         control_bar.addWidget(open_btn)
         control_bar.addWidget(reset_btn)
+        control_bar.addWidget(zoom_btn)
         
         # 添加历史记录按钮
         history_btn = QPushButton("历史记录 (F3)")
@@ -1875,6 +1886,53 @@ class MainWindow(QMainWindow):
 
         # 更新指针状态
         self.viewer.update_mode()
+
+    def toggle_fullscreen(self):
+        """切换全屏模式，只显示图像"""
+        if hasattr(self, '_is_custom_fullscreen') and self._is_custom_fullscreen:
+            # 如果已经是自定义全屏模式，则退出
+            self.exit_fullscreen()
+        else:
+            # 进入自定义全屏模式
+            if self.viewer.cv_img is None:
+                QMessageBox.warning(self, "提示", "请先打开一张图片")
+                return
+
+            # 保存当前布局状态
+            self._original_central_widget = self.centralWidget()
+            self._original_layout = self._original_central_widget.layout()
+
+            # 创建新的全屏窗口
+            self._fullscreen_viewer = ImageViewer()
+            self._fullscreen_viewer.set_image(self.viewer.cv_img)
+            self._fullscreen_viewer.set_scale(self.viewer.scale)
+
+            # 设置全屏
+            self._fullscreen_viewer.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+            self._fullscreen_viewer.showFullScreen()
+            self._is_custom_fullscreen = True
+
+            # 连接退出信号
+            self._fullscreen_viewer.keyPressEvent = self.handle_fullscreen_key_event
+
+    def exit_fullscreen(self):
+        """退出全屏模式"""
+        if hasattr(self, '_is_custom_fullscreen') and self._is_custom_fullscreen:
+            # 关闭全屏窗口
+            self._fullscreen_viewer.close()
+            del self._fullscreen_viewer
+            self._is_custom_fullscreen = False
+
+            # 恢复原始界面
+            self.showNormal()
+
+    def handle_fullscreen_key_event(self, event):
+        """处理全屏窗口的按键事件"""
+        if event.key() == Qt.Key_Escape:
+            self.exit_fullscreen()
+        else:
+            # 保持原有的按键处理
+            ImageViewer.keyPressEvent(self._fullscreen_viewer, event)
 
     def check_magnifier_status(self):
         """定时检查放大镜状态并更新"""
