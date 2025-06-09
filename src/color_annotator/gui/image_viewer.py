@@ -97,13 +97,17 @@ class ImageViewer(QLabel):
         self.magnifier_zoom = 2.5  # 减小放大倍数以容纳更大区域
         self.magnifier_size = 180  # 增加放大镜尺寸
         self.current_magnifier_pixmap = None  # 存储当前放大镜内容
-        self.magnifier_update_delay = 20  # 降低放大镜更新延迟(ms)，提高响应
+        self.magnifier_update_delay = 25  # 增加放大镜更新延迟(ms)，减少CPU负担
         self.last_magnifier_update = time.time()
         self.pending_update = False  # 是否有待处理的更新
         
         # 性能优化 - 添加绘制节流变量
         self.last_paint_time = 0
-        self.paint_throttle_ms = 15  # 降低绘制间隔时间(毫秒)，确保更流畅的体验
+        self.paint_throttle_ms = 25  # 增加绘制间隔时间(毫秒)，减少CPU使用
+        
+        # 优化绘制路径的参数
+        self.draw_path_throttle = 3  # 每隔多少个点更新一次显示
+        self.last_path_point = None
         
         # 界面设置
         self.setMouseTracking(True)
@@ -152,133 +156,196 @@ class ImageViewer(QLabel):
         self.scale = self.base_scale
 
     def set_add_mode(self):
-        if self.mode == "add":
-            # 当前是增加模式，点击后退出
-            self.mode = "normal"
-            print("[模式] 退出增加掩码模式，回到正常模式")
-            self.setCursor(Qt.ArrowCursor)
-            if self.add_button:
-                self.add_button.setStyleSheet("")
-            # 只在放大镜处于活动状态时才关闭它
-            if self.magnifier_active:
-                # 触发信号通知主窗口隐藏放大镜
+        try:
+            if self.mode == "add":
+                # 当前是增加模式，点击后退出
+                self.mode = "normal"
+                print("[模式] 退出增加掩码模式，回到正常模式")
+                self.setCursor(Qt.ArrowCursor)
+                self.magnifier_active = False  # 设置为False以彻底关闭放大镜和橡皮擦显示
+                self.dragging = False  # 重置拖拽状态
+                if self.add_button:
+                    self.add_button.setStyleSheet("")
+                # 无条件发送信号通知主窗口隐藏放大镜
                 self.magnifierUpdated.emit(QPixmap())
-        else:
-            # 当前不是增加模式，点击进入增加模式
-            self.mode = "add"
-            print("[模式] 进入增加掩码模式")
-            self.setCursor(Qt.BlankCursor)
-            if self.add_button:
-                self.add_button.setStyleSheet("background-color: lightgreen;")
-            if self.erase_button:
-                self.erase_button.setStyleSheet("")  # 取消擦除按钮高亮
-            # 只在放大镜处于活动状态时才触发它
-            if self.magnifier_active:
-                # 不改变magnifier_active状态，只根据当前状态通知UI
-                # 在mouseMoveEvent中会更新放大镜内容
-                pass
+                
+                # 检查当前掩码是否为空
+                if self.pending_mask_id in self.masks and self.mask is not None:
+                    if np.sum(self.mask) == 0:
+                        print("[警告] 掩码为空，将被移除")
+                        del self.masks[self.pending_mask_id]
+                        self.pending_mask_id = None
+                        self.mask = None
+            else:
+                # 当前不是增加模式，点击进入增加模式
+                self.mode = "add"
+                print("[模式] 进入增加掩码模式")
+                self.setCursor(Qt.BlankCursor)
+                self.magnifier_active = True  # 设置为True激活放大镜功能
+                self.dragging = False  # 进入增加模式时取消拖拽状态
+                if self.add_button:
+                    self.add_button.setStyleSheet("background-color: lightgreen;")
+                if self.erase_button:
+                    self.erase_button.setStyleSheet("")  # 取消擦除按钮高亮
+        except Exception as e:
+            print(f"[错误] 设置增加模式时出错: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            # 确保恢复正常模式
+            self.mode = "normal"
+            self.setCursor(Qt.ArrowCursor)
+            self.magnifier_active = False
 
     def paintEvent(self, event):
-        super().paintEvent(event)
-        if self.cv_img is None:
-            return
+        try:
+            super().paintEvent(event)
+            if self.cv_img is None:
+                return
 
-        painter = QPainter(self)
-        rgb_img = cv2.cvtColor(self.cv_img, cv2.COLOR_BGR2RGB)
-        height, width, channel = rgb_img.shape
-        bytes_per_line = channel * width
+            # 节流控制，降低CPU使用率
+            current_time = time.time() * 1000
+            if hasattr(self, 'last_full_paint_time') and self.mode not in ("add", "erase"):
+                if current_time - self.last_full_paint_time < 30:  # 30ms内不重复完整绘制
+                    return
+            self.last_full_paint_time = current_time
 
-        # === 掩码处理开始 ===
-        for mask_id, entry in self.masks.items():
-            if not entry.get('visible', True):
-                continue
+            painter = QPainter(self)
+            rgb_img = cv2.cvtColor(self.cv_img, cv2.COLOR_BGR2RGB)
+            height, width, channel = rgb_img.shape
+            bytes_per_line = channel * width
 
-            mask = entry['mask']
-            color = entry.get('color', (0, 255, 0))
-            r, g, b = color
+            # === 掩码处理开始 ===
+            # 检查masks字典是否存在和有效
+            if not hasattr(self, 'masks') or self.masks is None:
+                self.masks = {}
 
-            mask_bool = mask.astype(np.bool_)
-            overlay = rgb_img.copy()
-            # 如果当前是正在编辑的掩码，就使用高亮绿色显示
-            if entry.get("editable", False) and mask_id == self.pending_mask_id:
-                overlay[mask_bool] = (0, 255, 0)  # 高亮绿色
-            else:
-                overlay[mask_bool] = (r, g, b)
+            # 创建一个标记，检查是否有可见掩码
+            has_visible_masks = False
+            
+            for mask_id, entry in self.masks.items():
+                if not entry.get('visible', True):
+                    continue
 
-            # 半透明混合，仅对掩码区域有效
-            alpha = 0.8
-            rgb_img[mask_bool] = cv2.addWeighted(rgb_img[mask_bool], 1 - alpha, overlay[mask_bool], alpha, 0)
+                mask = entry.get('mask')
+                if mask is None:
+                    continue
+                    
+                # 检查掩码形状是否与图像匹配
+                if mask.shape != (height, width):
+                    print(f"[警告] 跳过形状不匹配的掩码 {mask_id}: {mask.shape} != {(height, width)}")
+                    continue
+                    
+                # 检查掩码是否为空
+                if np.sum(mask) <= 0:
+                    continue
+                    
+                has_visible_masks = True
+                
+                color = entry.get("color", (0, 255, 0))
+                if not isinstance(color, (tuple, list)) or len(color) != 3:
+                    color = (0, 255, 0)  # 使用默认绿色
+                    
+                r, g, b = color
+                
+                # 确保RGB值有效
+                r = min(max(0, r), 255)
+                g = min(max(0, g), 255)
+                b = min(max(0, b), 255)
 
-            # 添加边框轮廓
-            mask_uint8 = mask.astype(np.uint8) * 255
-            contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                mask_bool = mask.astype(np.bool_)
+                overlay = rgb_img.copy()
+                # 如果当前是正在编辑的掩码，就使用高亮绿色显示
+                if entry.get("editable", False) and mask_id == self.pending_mask_id:
+                    overlay[mask_bool] = (0, 255, 0)  # 高亮绿色
+                else:
+                    overlay[mask_bool] = (r, g, b)
 
-            # 判断是否为已保存标定（editable=False）
-            if entry.get('editable', False):
-                border_color = (r, g, b)  # 当前编辑掩码使用主色边框
-            else:
-                border_color = (200, 200, 200)  # 已保存标定使用白色边框，提升可见性
+                # 半透明混合，仅对掩码区域有效
+                alpha = 0.8
+                rgb_img[mask_bool] = cv2.addWeighted(rgb_img[mask_bool], 1 - alpha, overlay[mask_bool], alpha, 0)
 
-            scale_thickness = max(1, int(1 / self.scale))  # 根据缩放动态调整线宽
-            cv2.drawContours(rgb_img, contours, -1, border_color, thickness=scale_thickness)
+                # 添加边框轮廓 - 使用更高效的方法
+                if np.sum(mask_bool) > 0:  # 只有当掩码不为空时才计算轮廓
+                    mask_uint8 = mask.astype(np.uint8) * 255
+                    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # === 转换为 QPixmap 并绘制图像 ===
-        qt_img = QImage(rgb_img.data, width, height, bytes_per_line, QImage.Format_RGB888).copy()
-        pixmap = QPixmap.fromImage(qt_img).scaled(
-            int(self.cv_img.shape[1] * self.scale),
-            int(self.cv_img.shape[0] * self.scale),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
-        )
+                    # 判断是否为已保存标定（editable=False）
+                    if entry.get('editable', False):
+                        border_color = (r, g, b)  # 当前编辑掩码使用主色边框
+                    else:
+                        border_color = (200, 200, 200)  # 已保存标定使用白色边框，提升可见性
 
-        draw_x = int((self.width() - pixmap.width()) / 2 + self.offset.x())
-        draw_y = int((self.height() - pixmap.height()) / 2 + self.offset.y())
-        painter.drawPixmap(int(draw_x), int(draw_y), pixmap)
+                    # 根据缩放动态调整线宽，并限制最小/最大值
+                    scale_thickness = max(1, min(3, int(1 / self.scale)))
+                    cv2.drawContours(rgb_img, contours, -1, border_color, thickness=scale_thickness)
 
-        # === 点绘制：前景绿色、背景红色 ===
-        scaled_w = int(self.cv_img.shape[1] * self.scale)
-        scaled_h = int(self.cv_img.shape[0] * self.scale)
-        draw_x = (self.width() - scaled_w) // 2 + self.offset.x()
-        draw_y = (self.height() - scaled_h) // 2 + self.offset.y()
+            # === 转换为 QPixmap 并绘制图像 ===
+            qt_img = QImage(rgb_img.data, width, height, bytes_per_line, QImage.Format_RGB888).copy()
+            pixmap = QPixmap.fromImage(qt_img).scaled(
+                int(self.cv_img.shape[1] * self.scale),
+                int(self.cv_img.shape[0] * self.scale),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
 
-        painter.setBrush(Qt.green)
-        for x, y in self.fg_points:
-            px = int(x * self.scale + draw_x)
-            py = int(y * self.scale + draw_y)
-            painter.drawEllipse(QPoint(px, py), 5, 5)
+            draw_x = int((self.width() - pixmap.width()) / 2 + self.offset.x())
+            draw_y = int((self.height() - pixmap.height()) / 2 + self.offset.y())
+            painter.drawPixmap(int(draw_x), int(draw_y), pixmap)
 
-        painter.setBrush(Qt.red)
-        for x, y in self.bg_points:
-            px = int(x * self.scale + draw_x)
-            py = int(y * self.scale + draw_y)
-            painter.drawEllipse(QPoint(px, py), 5, 5)
+            # === 点绘制：前景绿色、背景红色 ===
+            scaled_w = int(self.cv_img.shape[1] * self.scale)
+            scaled_h = int(self.cv_img.shape[0] * self.scale)
+            draw_x = (self.width() - scaled_w) // 2 + self.offset.x()
+            draw_y = (self.height() - scaled_h) // 2 + self.offset.y()
 
-        # === 显示白色橡皮框 ===
-        if self.mode in ("erase", "add"):
-            cursor_pos = self.mapFromGlobal(QCursor.pos())
-            img_pos = self.map_to_image(cursor_pos)
-            x, y = int(img_pos.x()), int(img_pos.y())
-            half_size = self.eraser_size // 2
+            # 绘制前景点 (绿色)
+            if self.fg_points:
+                painter.setBrush(Qt.green)
+                for x, y in self.fg_points:
+                    px = int(x * self.scale + draw_x)
+                    py = int(y * self.scale + draw_y)
+                    painter.drawEllipse(QPoint(px, py), 5, 5)
 
-            scaled_x = int(x * self.scale + draw_x)
-            scaled_y = int(y * self.scale + draw_y)
-            scaled_erase_size = int(self.eraser_size * self.scale)
+            # 绘制背景点 (红色)
+            if self.bg_points:
+                painter.setBrush(Qt.red)
+                for x, y in self.bg_points:
+                    px = int(x * self.scale + draw_x)
+                    py = int(y * self.scale + draw_y)
+                    painter.drawEllipse(QPoint(px, py), 5, 5)
 
-            # 画橡皮边框（灰色描边 + 白色填充）
-            pen = painter.pen()
-            pen.setWidth(1)
-            pen.setColor(Qt.gray)  # 你可以改成 Qt.black 或 QColor(100, 100, 100)
-            painter.setPen(pen)
-            painter.setBrush(Qt.white)
-            if self.eraser_shape_circle:
-                painter.drawEllipse(QPoint(scaled_x, scaled_y), scaled_erase_size // 2, scaled_erase_size // 2)
-            else:
-                painter.drawRect(
-                    scaled_x - scaled_erase_size // 2,
-                    scaled_y - scaled_erase_size // 2,
-                    scaled_erase_size,
-                    scaled_erase_size
-                )
+            # === 显示白色橡皮框 ===
+            if self.mode in ("erase", "add"):
+                cursor_pos = self.mapFromGlobal(QCursor.pos())
+                if self.rect().contains(cursor_pos):  # 只在鼠标在视图内时绘制橡皮擦
+                    img_pos = self.map_to_image(cursor_pos)
+                    x, y = int(img_pos.x()), int(img_pos.y())
+                    half_size = self.eraser_size // 2
+
+                    scaled_x = int(x * self.scale + draw_x)
+                    scaled_y = int(y * self.scale + draw_y)
+                    scaled_erase_size = int(self.eraser_size * self.scale)
+
+                    # 画橡皮边框（灰色描边 + 白色填充）
+                    pen = painter.pen()
+                    pen.setWidth(1)
+                    pen.setColor(Qt.gray)
+                    painter.setPen(pen)
+                    painter.setBrush(QColor(255, 255, 255, 80))  # 半透明白色
+                    
+                    if self.eraser_shape_circle:
+                        painter.drawEllipse(QPoint(scaled_x, scaled_y), scaled_erase_size // 2, scaled_erase_size // 2)
+                    else:
+                        painter.drawRect(
+                            scaled_x - scaled_erase_size // 2,
+                            scaled_y - scaled_erase_size // 2,
+                            scaled_erase_size,
+                            scaled_erase_size
+                        )
+        except Exception as e:
+            print(f"[错误] 绘制过程出错: {e}")
+            import traceback
+            print(traceback.format_exc())
 
     def mousePressEvent(self, event):
         self.setFocus()  # 鼠标点击时抢焦点，确保能按快捷键
@@ -336,10 +403,11 @@ class ImageViewer(QLabel):
                     self.point_added.emit()  # 發送點添加信號
                     self.repaint()
                 else:
-                    # 左键拖动
+                    # 左键拖动 - 确保在normal模式下能够拖拽
                     self.dragging = True
                     self.last_mouse_pos = event.pos()
                     self.setCursor(Qt.ClosedHandCursor)
+                    print("[拖拽] 开始图像拖拽")
 
             elif event.button() == Qt.RightButton:
                 # 右键添加前景点
@@ -448,9 +516,21 @@ class ImageViewer(QLabel):
                     self.annotationAdded.emit((color, mask_id))
 
             """根据当前模式，擦除或增加掩码"""
+            # 确保cv_img存在
+            if self.cv_img is None:
+                print("[错误] 没有加载图像")
+                return
+
+            # 检查是否有有效的掩码
             if self.mask is None:
-                h, w = self.cv_img.shape[:2]
-                self.mask = np.zeros((h, w), dtype=bool)
+                # 如果没有当前掩码，根据模式创建一个新的
+                if self.mode == "add":
+                    h, w = self.cv_img.shape[:2]
+                    self.mask = np.zeros((h, w), dtype=bool)
+                else:
+                    # 擦除模式下没有掩码，直接返回
+                    print("[提示] 擦除模式下没有有效的掩码")
+                    return
 
             # 检查坐标是否在图像范围内
             h, w = self.cv_img.shape[:2]
@@ -458,11 +538,15 @@ class ImageViewer(QLabel):
                 return
 
             # 只处理 editable=True 的当前掩码（如果当前掩码不在 masks 中则默认允许）
-            for mask_id, entry in self.masks.items():
-                if entry.get("editable", False):
-                    break
-            else:
-                # 没有可编辑掩码，说明是只读状态，不进行修改
+            mask_is_editable = False
+            
+            # 检查是否有可编辑的掩码
+            if self.pending_mask_id in self.masks:
+                mask_is_editable = self.masks[self.pending_mask_id].get("editable", False)
+            
+            # 如果没有可编辑掩码，且处于擦除模式，直接返回
+            if not mask_is_editable and self.mode == "erase":
+                print("[提示] 没有可擦除的掩码")
                 return
 
             half_size = self.eraser_size // 2
@@ -601,18 +685,31 @@ class ImageViewer(QLabel):
         if self.cv_img is None or self.mask is None:
             return None
 
-        # 使用颜色分析器提取主色
-        color_infos = self.color_analyzer.analyze_image_colors(
-            self.cv_img, 
-            self.mask,
-            k=5  # 提取5个主要颜色
-        )
+        try:
+            # 检查掩码是否为空
+            if np.sum(self.mask) == 0:
+                print("[警告] 掩码为空，无法提取颜色")
+                return None
 
-        if not color_infos:
+            # 使用颜色分析器提取主色
+            color_infos = self.color_analyzer.analyze_image_colors(
+                self.cv_img, 
+                self.mask,
+                k=5  # 提取5个主要颜色
+            )
+
+            if not color_infos:
+                print("[提示] 颜色分析器未返回任何颜色")
+                return None
+
+            # 返回占比最大的颜色信息对象
+            return color_infos[0]  # 返回ColorInfo对象
+            
+        except Exception as e:
+            print(f"[错误] 提取主色时出错: {e}")
+            import traceback
+            print(traceback.format_exc())
             return None
-
-        # 返回占比最大的颜色信息对象
-        return color_infos[0]  # 返回ColorInfo对象
 
     def set_mask_visibility(self, mask_id, visible, color=None):
         if mask_id in self.masks:
@@ -646,21 +743,24 @@ class ImageViewer(QLabel):
                 self.modify_mask(x0, y0, repaint=False)
                 return
             
-            # 增加插值点数量，确保线条连续性
-            # 对于所有距离都使用足够多的点来保证连续性
-            steps = min(distance * 2, 50)  # 增加插值点数量，但设置上限避免过多计算
+            # 根据距离动态调整步数，短距离使用较少步数，提高性能
+            if distance < 10:
+                steps = distance + 1  # 短距离使用较少的点
+            elif distance < 30:
+                steps = distance  # 中等距离使用适中的点
+            else:
+                steps = min(distance // 2, 30)  # 长距离使用更少的点，但设置上限
             
             # 使用NumPy生成插值点序列
             t = np.linspace(0, 1, int(steps))
             x_points = np.array(x0 + dx * t, dtype=int)
             y_points = np.array(y0 + dy * t, dtype=int)
             
-            # 遍历插值点，每隔几个点重绘一次以保持性能
+            # 使用向量化操作处理所有点，而不是逐点处理
             for i, (x, y) in enumerate(zip(x_points, y_points)):
-                self.modify_mask(x, y, repaint=(i % 5 == 0))  # 每5个点更新一次显示
-            
-            # 确保最后一个点被绘制并刷新显示
-            self.modify_mask(x1, y1, repaint=True)
+                # 更加激进的节流，长距离时减少重绘频率
+                needs_repaint = (i == len(x_points) - 1) or (i % self.draw_path_throttle == 0)
+                self.modify_mask(x, y, repaint=needs_repaint)
                 
         except Exception as e:
             print(f"[错误] 绘制线条时出错: {str(e)}")
@@ -686,7 +786,10 @@ class ImageViewer(QLabel):
                         self.pending_update = True
                 
                 # 强制更新绘制以显示橡皮擦位置
-                self.update()
+                current_time = time.time() * 1000
+                if current_time - self.last_paint_time > self.paint_throttle_ms:
+                    self.last_paint_time = current_time
+                    self.update()
                 
                 # 处理绘制操作
                 if left_pressed and self.is_editing:
@@ -700,9 +803,11 @@ class ImageViewer(QLabel):
 
                     if self.last_erase_pos is not None:
                         last_x, last_y = self.last_erase_pos
-                        # 减少阈值，确保更小的移动也能被捕获
-                        self.draw_line_between_points(last_x, last_y, x, y)
-                        self.last_erase_pos = (x, y)
+                        # 检查移动距离，如果移动很小则跳过处理
+                        move_distance = np.sqrt((x - last_x)**2 + (y - last_y)**2)
+                        if move_distance > 1.5:  # 移动超过1.5像素才处理
+                            self.draw_line_between_points(last_x, last_y, x, y)
+                            self.last_erase_pos = (x, y)
                     else:
                         self.modify_mask(x, y, save_history=False)
                         self.last_erase_pos = (x, y)
@@ -712,7 +817,7 @@ class ImageViewer(QLabel):
                     delta = event.pos() - self.last_mouse_pos
                     self.offset += delta
                     self.last_mouse_pos = event.pos()
-                    self.repaint()
+                    self.update()
 
             super().mouseMoveEvent(event)
         except Exception as e:
@@ -728,6 +833,7 @@ class ImageViewer(QLabel):
                 if self.mode not in ("add", "erase"):
                     # 只有在非编辑模式下才关闭放大镜
                     if self.magnifier_active:
+                        self.magnifier_active = False  # 明确设置为False
                         try:
                             self.magnifierUpdated.emit(QPixmap())
                         except Exception as e:
@@ -738,6 +844,7 @@ class ImageViewer(QLabel):
                 if self.dragging:
                     self.dragging = False
                     self.setCursor(Qt.ArrowCursor)
+                    print("[拖拽] 结束图像拖拽")
                 
                 # 强制重绘
                 self.update()
@@ -769,31 +876,46 @@ class ImageViewer(QLabel):
         self.erase_button = button
 
     def set_erase_mode(self):
-        if self.mode == "erase":
-            # 当前是擦除模式，点击后退出
-            self.mode = "normal"
-            print("[模式] 退出擦除掩码模式，回到正常模式")
-            self.setCursor(Qt.ArrowCursor)
-            if self.erase_button:
-                self.erase_button.setStyleSheet("")
-            # 只在放大镜处于活动状态时才关闭它
-            if self.magnifier_active:
-                # 触发信号通知主窗口隐藏放大镜
+        try:
+            if self.mode == "erase":
+                # 当前是擦除模式，点击后退出
+                self.mode = "normal"
+                print("[模式] 退出擦除掩码模式，回到正常模式")
+                self.setCursor(Qt.ArrowCursor)
+                self.magnifier_active = False  # 设置为False以彻底关闭放大镜和橡皮擦显示
+                self.dragging = False  # 重置拖拽状态
+                if self.erase_button:
+                    self.erase_button.setStyleSheet("")
+                # 无条件发送信号通知主窗口隐藏放大镜
                 self.magnifierUpdated.emit(QPixmap())
-        else:
-            # 当前不是擦除模式，点击进入擦除模式
-            self.mode = "erase"
-            print("[模式] 进入擦除掩码模式")
-            self.setCursor(Qt.BlankCursor)
-            if self.erase_button:
-                self.erase_button.setStyleSheet("background-color: lightblue;")
-            if self.add_button:
-                self.add_button.setStyleSheet("")  # 取消增加按钮高亮
-            # 只在放大镜处于活动状态时才触发它
-            if self.magnifier_active:
-                # 不改变magnifier_active状态，只根据当前状态通知UI
-                # 在mouseMoveEvent中会更新放大镜内容
-                pass
+                
+                # 检查当前掩码是否已完全擦除
+                if self.pending_mask_id in self.masks and self.mask is not None:
+                    if np.sum(self.mask) == 0:
+                        print("[警告] 掩码已被完全擦除，将被移除")
+                        del self.masks[self.pending_mask_id]
+                        self.pending_mask_id = None
+                        self.mask = None
+                
+            else:
+                # 当前不是擦除模式，点击进入擦除模式
+                self.mode = "erase"
+                print("[模式] 进入擦除掩码模式")
+                self.setCursor(Qt.BlankCursor)
+                self.magnifier_active = True  # 设置为True激活放大镜功能
+                self.dragging = False  # 进入擦除模式时取消拖拽状态
+                if self.erase_button:
+                    self.erase_button.setStyleSheet("background-color: lightblue;")
+                if self.add_button:
+                    self.add_button.setStyleSheet("")  # 取消增加按钮高亮
+        except Exception as e:
+            print(f"[错误] 设置擦除模式时出错: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            # 确保恢复正常模式
+            self.mode = "normal"
+            self.setCursor(Qt.ArrowCursor)
+            self.magnifier_active = False
 
     def update_mask(self, x, y):
         """更新掩码"""
@@ -1033,26 +1155,6 @@ class ImageViewer(QLabel):
         else:
             self.setCursor(Qt.ArrowCursor)
         self.update()
-
-    def set_add_mode(self):
-        """设置增加掩码模式"""
-        self.mode = "add"
-
-    def set_erase_mode(self):
-        """设置擦除掩码模式"""
-        self.mode = "erase"
-
-    def update_mode(self):
-        """更新当前模式状态"""
-        if self.mode == "add":
-            self.setCursor(Qt.CrossCursor)
-        elif self.mode == "erase":
-            self.setCursor(Qt.CrossCursor)  # 或者使用其他适合擦除的指针
-        else:
-            self.setCursor(Qt.ArrowCursor)
-        self.update()
-
-
 
     def update_magnifier(self, pos):
         """更新放大镜预览"""

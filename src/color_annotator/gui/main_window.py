@@ -1123,6 +1123,9 @@ class MainWindow(QMainWindow):
 
     def calculate_mask_data(self):
         """计算掩码数据"""
+        if not hasattr(self.viewer, 'cv_img') or self.viewer.cv_img is None:
+            return None
+
         total_pixels = self.viewer.cv_img.shape[0] * self.viewer.cv_img.shape[1]
         colors_data = []
         mask_pixels = {}
@@ -1134,11 +1137,19 @@ class MainWindow(QMainWindow):
                 mask_id = id_item.data(Qt.UserRole)
                 if mask_id and mask_id in self.viewer.masks:
                     mask_data = self.viewer.masks[mask_id]
+                    # 检查掩码是否可见
+                    if not mask_data.get('visible', True):
+                        continue
+                        
                     mask = mask_data.get('mask')
                     if mask is None:
                         continue
 
                     mask_pixel_count = np.sum(mask)
+                    # 如果掩码是空的，跳过
+                    if mask_pixel_count <= 0:
+                        continue
+                        
                     r, g, b = id_item.data(Qt.UserRole + 1)
 
                     mask_pixels[mask_id] = {
@@ -1146,9 +1157,18 @@ class MainWindow(QMainWindow):
                         'rgb': (r, g, b)
                     }
 
-        # 计算百分比
+        # 如果没有有效掩码，返回None
+        if not mask_pixels:
+            return None
+            
+        # 计算所有掩码的总像素数
+        total_mask_pixels = sum(data['count'] for data in mask_pixels.values())
+        if total_mask_pixels <= 0:
+            return None
+
+        # 计算百分比 - 相对于掩码总面积而不是图像总像素
         for mask_id, data in mask_pixels.items():
-            percentage = data['count'] / total_pixels
+            percentage = data['count'] / total_mask_pixels  # 更改为相对于掩码总面积的占比
             colors_data.append({
                 'rgb': data['rgb'],
                 'percentage': percentage
